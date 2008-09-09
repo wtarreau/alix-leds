@@ -1,9 +1,10 @@
 /*
- * alix-leds : blink leds on ALIX motherboards depending on network status.
- * (C) 2008 - Willy Tarreau <w@1wt.eu> - Redistribute under GPLv2
+ * alix-leds version 1.0 - (C) 2008 - Willy Tarreau <w@1wt.eu>
+ * Blink LEDs on ALIX motherboards depending on network status.
+ * Redistribute under GPLv2.
  *
  * Usage:
- *   alix-leds [eth] [ppp] [tun]   (defaults to eth2, ppp0 and tun0)
+ *   alix-leds [-e eth] [-p ppp] [-t tun]   (defaults: eth2, ppp0 and tun0)
  *
  * Led3 will be off when eth is down, will slowly blink when eth is up and ppp
  * down, and will emit two quick flashes when eth&ppp are up but tun is down.
@@ -12,6 +13,7 @@
 
 #include <ctype.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -53,6 +55,22 @@ struct if_status {
 	int present;
 	int status;
 };
+
+const char usage[] =
+  "alix-leds version 1.0 - (C) 2008 - Willy Tarreau <w@1wt.eu>\n"
+  "  Blink LEDs on ALIX motherboards depending on network status.\n"
+  "\n"
+  "Usage:\n"
+  "  # alix-leds [-l 1|2|3] [-e eth] [-p ppp] [-t tun]\n"
+  "    Defaults to: -l 3 -e eth2\n"
+  "    Unspecified interfaces are ignored (considered up).\n"
+  "\n"
+  "Reported status :\n"
+  "  - when all interfaces are down, the LED remains off.\n"
+  "  - when the eth interface is up, the LED blinks slowly (once per second).\n"
+  "  - when the ppp interface is up, the LED flashes twice a second.\n"
+  "  - when all interfaces are up, the LED remains lit.\n"
+  "";
 
 /* if ret < 0, report msg with perror and return -ret.
  * if ret > 0, return msg on stderr and return ret
@@ -96,22 +114,6 @@ int glink(int sock, const char *dev)
 	return edata.data ? 1 : 0;
 }
 
-/* return 1 if interface <dev> exists, otherwise 0. The problem
- * is that the system will do a modprobe every time, which eats
- * a lot of CPU.
- */
-int if_exist_ioctl(int sock, const char *dev)
-{
-	struct ifreq ifr;
-
-	memset(&ifr, 0, sizeof(ifr));
-	strncpy(ifr.ifr_name, dev, sizeof(ifr.ifr_name)-1);
-
-	if (ioctl(sock, SIOCGIFINDEX, &ifr) != 0)
-		return 0;
-	return 1;
-}
-
 /* return 1 if interface <dev> is up, otherwise 0. */
 int if_up(int sock, const char *dev)
 {
@@ -125,10 +127,12 @@ int if_up(int sock, const char *dev)
 	return (ifr.ifr_flags & IFF_UP) ? 1 : 0;
 }
 
-/* Returns the number of existing devices found in /proc/net/dev.
- * Their corresponding entry gets ->present set to 1 if the device
- * exists, or zero if it was not found. Note that it is permitted
- * to have several interfaces with the same name.
+/* Returns the number of existing devices found in /proc/net/dev. Their
+ * corresponding entry gets ->present set to 1 if the device exists, or zero
+ * if it was not found. Note that it is permitted to have several interfaces
+ * with the same name. It is important to check for device existence before
+ * querying it, because it avoids the automatic modprobe the system may do
+ * for absent devices.
  */
 int if_exist(struct if_status *if1, struct if_status *if2, struct if_status *if3)
 {
@@ -157,15 +161,15 @@ int if_exist(struct if_status *if1, struct if_status *if2, struct if_status *if3
 			continue;
 		*(colon++) = 0;
 
-		if (strcmp(name, if1->name) == 0) {
+		if (*if1->name && strcmp(name, if1->name) == 0) {
 			if1->present = 1;
 			ret++;
 		}
-		if (strcmp(name, if2->name) == 0) {
+		if (*if2->name && strcmp(name, if2->name) == 0) {
 			if2->present = 1;
 			ret++;
 		}
-		if (strcmp(name, if3->name) == 0) {
+		if (*if3->name && strcmp(name, if3->name) == 0) {
 			if3->present = 1;
 			ret++;
 		}
@@ -184,25 +188,59 @@ int main(int argc, char **argv)
 	int sock;
 	int count, limit, flash;
 	struct sched_param sch;
-	struct if_status eth, ppp, tun;
+
+	struct if_status eth = { .name = "eth2"};
+	struct if_status ppp = { .name = ""};
+	struct if_status tun = { .name = ""};
 
 	unsigned int port   = LED3_PORT;
 	unsigned int leds   = LED3_MASK;
 
-	if (argc > 1)
-		eth.name = argv[1];
-	else
-		eth.name = "eth2";
+	argc--; argv++;
+	while (argc > 0) {
+		if (strcmp(*argv, "-h") == 0)
+			die(0, usage);
 
-	if (argc > 2)
-		ppp.name = argv[2];
-	else
-		ppp.name = "ppp0";
+		/* options with two args below */
+		if (argc < 2)
+			die(1, usage);
 
-	if (argc > 3)
-		tun.name = argv[3];
-	else
-		tun.name = "tun0";
+		if (strcmp(*argv, "-e") == 0) {
+			eth.name = argv[1];
+			argc--; argv++;
+		}
+		else if (strcmp(*argv, "-p") == 0) {
+			ppp.name = argv[1];
+			argc--; argv++;
+		}
+		else if (strcmp(*argv, "-t") == 0) {
+			tun.name = argv[1];
+			argc--; argv++;
+		}
+		else if (strcmp(*argv, "-l") == 0) {
+			int l = atoi(argv[1]);
+			argc--; argv++;
+			switch (l) {
+			case 1:
+				leds = LED1_MASK;
+				port = LED1_PORT;
+				break;
+			case 2:
+				leds = LED2_MASK;
+				port = LED2_PORT;
+				break;
+			case 3:
+				leds = LED3_MASK;
+				port = LED3_PORT;
+				break;
+			default:
+				die(1, usage);
+			}
+		}
+		else
+			die(1, usage);
+		argc--; argv++;
+	}
 
 	if (iopl(3) == -1)
 		die(-1, "Cannot get I/O port");
@@ -230,14 +268,19 @@ int main(int argc, char **argv)
 	/* This part runs in background */
 	count = limit = flash = 0;
 	while (1) {
-		eth.status = 0;
-		ppp.status = 0;
-		tun.status = 0;
-
 		if_exist(&eth, &ppp, &tun);
-		eth.status = eth.present && (glink(sock, eth.name) == 1);
-		ppp.status = ppp.present && (if_up(sock, ppp.name) == 1);
-		tun.status = tun.present && (if_up(sock, tun.name) == 1);
+		eth.status = !(*eth.name) ||
+			(eth.present &&
+			 (if_up(sock, eth.name) == 1) &&
+			 (glink(sock, eth.name) == 1));
+
+		ppp.status = !(*ppp.name) ||
+			(ppp.present &&
+			 (if_up(sock, ppp.name) == 1));
+
+		tun.status = !(*tun.name) ||
+			(tun.present &&
+			 (if_up(sock, tun.name) == 1));
 
 		if (eth.status && ppp.status && tun.status) {
 			limit = MAXSTEPS; // always on if eth & ppp & tun UP
@@ -267,7 +310,7 @@ int main(int argc, char **argv)
 		       flash, count, limit, count<limit);
 		usleep(SLEEPTIME);
 #else
-		if (count == limit-1 && flash) {
+		if (count == MAXSTEPS-1 && flash) {
 			setled(leds, LED_ON, port);
 			usleep(SLEEPTIME * 45/100);
 			setled(leds, ~LED_ON, port);
