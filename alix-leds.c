@@ -105,7 +105,7 @@ const char usage[] =
   "  - when <slave> is down or absent, the LED blinks slowly (once per second).\n"
   "  - when <tun> is down or absent, the LED flashes twice a second.\n"
   "The 'running' more (-r) will slowly blink the led at 1 Hz. Using -R will blink\n"
-  "it at 10 Hz.\n"
+  "it at 10 Hz. SIGUSR1 switches running leds to -r, SIGUSR2 switches them to -R.\n"
   "Use -p to store the daemon's pid into file <pidfile>.\n"
   "";
 
@@ -317,6 +317,19 @@ void manage_net(struct led *led)
 	}
 }
 
+void sig_handler(int sig)
+{
+	switch (sig) {
+	case SIGUSR1:
+		fast_mode = 0;
+		break;
+	case SIGUSR2:
+		fast_mode = 1;
+		break;
+	}
+	signal(sig, sig_handler);
+}
+
 static inline void init_leds(struct led *led)
 {
 	led[0].port = LED1_PORT;
@@ -437,6 +450,9 @@ int main(int argc, char **argv)
 		sched_setscheduler(0, SCHED_OTHER, &sch);
 		setpriority(PRIO_PROCESS, 0, 20);
 	}
+
+	signal(SIGUSR1, sig_handler);
+	signal(SIGUSR2, sig_handler);
 
 #ifndef DEBUG
 	if (pidname) {
