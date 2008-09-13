@@ -4,7 +4,7 @@
  * Redistribute under GPLv2.
  *
  * Usage:
- *   alix-leds { [-l 1|2|3] [-p|-f] [-i intf] [-s slave] [-t tun] }*
+ *   alix-leds { [-l 1|2|3] [-urR] [-i intf] [-s slave] [-t tun] }*
  *
  * For more info, check the "usage" help string below.
  */
@@ -63,6 +63,7 @@ enum {
 	LED_UNUSED = 0,
 	LED_NET = 1,
 	LED_RUNNING = 2,
+	LED_CPU = 3,
 };
 
 struct if_status {
@@ -83,6 +84,8 @@ struct led {
 };
 
 static struct led leds[3];
+static unsigned int cpu_total[2], cpu_idle[2];
+static unsigned int cpu_usage;
 
 /* network socket */
 static int net_sock = -2; /* -2 = unneeded, -1 = needed, >=0 = initialized */
@@ -93,7 +96,7 @@ const char usage[] =
   "  Blink LEDs on ALIX motherboards depending on system and network status.\n"
   "\n"
   "Usage:\n"
-  "  # alix-leds [-p pidfile] {[-l 1|2|3] [-r|-R] [-i intf] [-s slave] [-t tun]}*\n"
+  "  # alix-leds [-p pidfile] {[-l 1|2|3] [-urR] [-i intf] [-s slave] [-t tun]}*\n"
   "\n"
   "LEDs 1,2,3 are independently managed. Specify one led, followed by the checks\n"
   "to associate to that LED. Repeat for other leds. Network interface status can\n"
@@ -106,7 +109,8 @@ const char usage[] =
   "  - when <tun> is down or absent, the LED flashes twice a second.\n"
   "The 'running' more (-r) will slowly blink the led at 1 Hz. Using -R will blink\n"
   "it at 10 Hz. SIGUSR1 switches running leds to -r, SIGUSR2 switches them to -R.\n"
-  "Use -p to store the daemon's pid into file <pidfile>.\n"
+  "Use -p to store the daemon's pid into file <pidfile>. The 'usage' mode (-u)\n"
+  "reports CPU usage by blinking slower or faster depending on the load."
   "";
 
 /* if ret < 0, report msg with perror and return -ret.
@@ -211,11 +215,120 @@ int if_exist(struct if_status *if1, struct if_status *if2, struct if_status *if3
 	return ret;
 }
 
+/* retrieve CPU usage from /proc/uptime, and update cpu_total[] and cpu_idle[].
+ * Return 0 if any error, or 1 if values were updated.
+ */
+int update_cpu()
+{
+	char buffer[256];
+	FILE *f;
+	char *ptr;
+	unsigned int total, idle;
+
+	f = fopen("/proc/uptime", "r");
+	if (!f)
+		return 0;
+
+	ptr = fgets(buffer, sizeof(buffer), f);
+	fclose(f);
+
+	if (!ptr)
+		return 0;
+
+	/* format : 
+	 * cpu_total_sec.centisec cpu_idle_sec.centisec
+	 */
+
+	total = 0;
+	while (*ptr && *ptr != ' ') {
+		if (isdigit(*ptr)) /* ignore dot */
+			total = total*10 + *ptr - '0';
+		ptr++;
+	}
+
+	while (isspace(*ptr))
+		ptr++;
+
+	idle = 0;
+	while (*ptr && *ptr != '\n') {
+		if (isdigit(*ptr)) /* ignore dot */
+			idle = idle*10 + *ptr - '0';
+		ptr++;
+	}
+
+	cpu_total[0] = cpu_total[1];
+	cpu_total[1] = total;
+	cpu_idle[0] = cpu_idle[1];
+	cpu_idle[1] = idle;
+
+	total = cpu_total[1] - cpu_total[0];
+	idle = cpu_idle[1] - cpu_idle[0];
+
+	/* CPU usage between 0 and 100 */
+	if (cpu_total[0] && total)
+		cpu_usage = ((total - idle)*100) / total;
+	if (cpu_usage < 0)
+		cpu_usage = 0;
+	else if (cpu_usage > 100)
+		cpu_usage = 100;
+
+	return 1;
+}
+
+
 static inline void setled(unsigned leds, unsigned mask, unsigned port)
 {
 #ifndef DEBUG
 	outl(leds & mask, port);
 #endif
+}
+
+void manage_cpu(struct led *led)
+{
+	if (led->state == 0) {
+		/* we want a valid first measure */
+		if (update_cpu())
+			led->state = 1;
+		led->sleep = SLEEP_1SEC / 2;
+		led->count = 0;
+		led->limit = 1;
+		return;
+	}
+
+	led->count++;
+	if (led->count >= led->limit) {
+		int last_usage = cpu_usage;
+		int diff;
+
+		update_cpu();
+		/* We want 500ms ON/500ms OFF at 0% CPU, and 40ms ON/60 ms OFF at 100%,
+		 * which means that we come here 10 times faster at 100%. If we detect
+		 * a fast variation, we will plan to quickly recheck.
+		 */
+
+		diff = (cpu_usage - last_usage);
+		if (diff < 0)
+			diff = -diff;
+
+		if (diff < 10)
+			led->limit = cpu_usage / 10;
+		else
+			led->limit = cpu_usage / 50;
+		led->count = 0;
+	}
+
+	switch (led->state) {
+	case 1:
+		led->sleep = (SLEEP_1SEC * 40/1000) + (SLEEP_1SEC * 46/10000) * (100-cpu_usage);
+		setled(led->mask, LED_ON, led->port);
+		led->state = 2;
+		break;
+	case 2:
+		led->sleep = (SLEEP_1SEC * 60/1000) + (SLEEP_1SEC * 44/10000) * (100-cpu_usage);
+		setled(led->mask, ~LED_ON, led->port);
+		led->state = 1;
+		break;
+	}
 }
 
 void manage_running(struct led *led)
@@ -359,6 +472,13 @@ int main(int argc, char **argv)
 		/* options with one arg first */
 		if (strcmp(*argv, "-h") == 0)
 			die(0, usage);
+		else if (strcmp(*argv, "-u") == 0) {
+			if (!led)
+				die(1, "Must specify led before cpu mode");
+			if (led->type != LED_UNUSED && led->type != LED_CPU)
+				die(1, "LED already assigned to non-cpu polling");
+			led->type = LED_CPU;
+		}
 		else if (strcmp(*argv, "-r") == 0) {
 			if (!led)
 				die(1, "Must specify led before running mode");
@@ -504,6 +624,9 @@ int main(int argc, char **argv)
 				break;
 			case LED_RUNNING:
 				manage_running(led);
+				break;
+			case LED_CPU:
+				manage_cpu(led);
 				break;
 			}
 		}
