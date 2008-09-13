@@ -72,6 +72,11 @@ struct if_status {
 	int status;
 };
 
+struct cpu_status {
+	unsigned int cpu_total[2], cpu_idle[2];
+	unsigned int cpu_usage;
+};
+
 struct led {
 	int type;  /* led type (LED_*). 0 = unused */
 	int state; /* internal state. 0 at init. 1 for first state. */
@@ -80,12 +85,11 @@ struct led {
 	unsigned int mask; /* on/off mask */
 	char *disk_name;
 	struct if_status intf, slave, tun; /* checked interfaces */
+	struct cpu_status cpu;
 	int count, limit, flash;           /* used for interface status */
 };
 
 static struct led leds[3];
-static unsigned int cpu_total[2], cpu_idle[2];
-static unsigned int cpu_usage;
 
 /* network socket */
 static int net_sock = -2; /* -2 = unneeded, -1 = needed, >=0 = initialized */
@@ -218,7 +222,7 @@ int if_exist(struct if_status *if1, struct if_status *if2, struct if_status *if3
 /* retrieve CPU usage from /proc/uptime, and update cpu_total[] and cpu_idle[].
  * Return 0 if any error, or 1 if values were updated.
  */
-int update_cpu()
+int update_cpu(struct led *led)
 {
 	char buffer[256];
 	FILE *f;
@@ -256,21 +260,21 @@ int update_cpu()
 		ptr++;
 	}
 
-	cpu_total[0] = cpu_total[1];
-	cpu_total[1] = total;
-	cpu_idle[0] = cpu_idle[1];
-	cpu_idle[1] = idle;
+	led->cpu.cpu_total[0] = led->cpu.cpu_total[1];
+	led->cpu.cpu_total[1] = total;
+	led->cpu.cpu_idle[0] = led->cpu.cpu_idle[1];
+	led->cpu.cpu_idle[1] = idle;
 
-	total = cpu_total[1] - cpu_total[0];
-	idle = cpu_idle[1] - cpu_idle[0];
+	total = led->cpu.cpu_total[1] - led->cpu.cpu_total[0];
+	idle = led->cpu.cpu_idle[1] - led->cpu.cpu_idle[0];
 
 	/* CPU usage between 0 and 100 */
-	if (cpu_total[0] && total)
-		cpu_usage = ((total - idle)*100) / total;
-	if (cpu_usage < 0)
-		cpu_usage = 0;
-	else if (cpu_usage > 100)
-		cpu_usage = 100;
+	if (led->cpu.cpu_total[0] && total)
+		led->cpu.cpu_usage = ((total - idle)*100) / total;
+	if (led->cpu.cpu_usage < 0)
+		led->cpu.cpu_usage = 0;
+	else if (led->cpu.cpu_usage > 100)
+		led->cpu.cpu_usage = 100;
 
 	return 1;
 }
@@ -287,7 +291,7 @@ void manage_cpu(struct led *led)
 {
 	if (led->state == 0) {
 		/* we want a valid first measure */
-		if (update_cpu())
+		if (update_cpu(led))
 			led->state = 1;
 		led->sleep = SLEEP_1SEC / 2;
 		led->count = 0;
@@ -297,34 +301,34 @@ void manage_cpu(struct led *led)
 
 	led->count++;
 	if (led->count >= led->limit) {
-		int last_usage = cpu_usage;
+		int last_usage = led->cpu.cpu_usage;
 		int diff;
 
-		update_cpu();
+		update_cpu(led);
 		/* We want 500ms ON/500ms OFF at 0% CPU, and 40ms ON/60 ms OFF at 100%,
 		 * which means that we come here 10 times faster at 100%. If we detect
 		 * a fast variation, we will plan to quickly recheck.
 		 */
 
-		diff = (cpu_usage - last_usage);
+		diff = (led->cpu.cpu_usage - last_usage);
 		if (diff < 0)
 			diff = -diff;
 
 		if (diff < 10)
-			led->limit = cpu_usage / 10;
+			led->limit = led->cpu.cpu_usage / 10;
 		else
-			led->limit = cpu_usage / 50;
+			led->limit = led->cpu.cpu_usage / 50;
 		led->count = 0;
 	}
 
 	switch (led->state) {
 	case 1:
-		led->sleep = (SLEEP_1SEC * 40/1000) + (SLEEP_1SEC * 46/10000) * (100-cpu_usage);
+		led->sleep = (SLEEP_1SEC * 40/1000) + (SLEEP_1SEC * 46/10000) * (100 - led->cpu.cpu_usage);
 		setled(led->mask, LED_ON, led->port);
 		led->state = 2;
 		break;
 	case 2:
-		led->sleep = (SLEEP_1SEC * 60/1000) + (SLEEP_1SEC * 44/10000) * (100-cpu_usage);
+		led->sleep = (SLEEP_1SEC * 60/1000) + (SLEEP_1SEC * 44/10000) * (100 - led->cpu.cpu_usage);
 		setled(led->mask, ~LED_ON, led->port);
 		led->state = 1;
 		break;
