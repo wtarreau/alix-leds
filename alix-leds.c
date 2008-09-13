@@ -303,7 +303,8 @@ int update_cpu(struct led *led)
 
 	total = led->cpu.cpu_total[1] - led->cpu.cpu_total[0];
 	idle = led->cpu.cpu_idle[1] - led->cpu.cpu_idle[0];
-
+	if (idle > total) // kernel 2.6 workaround
+		idle = total;
 	/* CPU usage between 0 and 100 */
 	if (led->cpu.cpu_total[0] && total)
 		led->cpu.cpu_usage = ((total - idle)*100) / total;
