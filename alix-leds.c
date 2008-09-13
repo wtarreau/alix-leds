@@ -4,7 +4,7 @@
  * Redistribute under GPLv2.
  *
  * Usage:
- *   alix-leds { [-l 1|2|3] [-i intf] [-s slave] [-t tun] }*
+ *   alix-leds { [-l 1|2|3] [-p|-f] [-i intf] [-s slave] [-t tun] }*
  *
  * For more info, check the "usage" help string below.
  */
@@ -62,6 +62,7 @@ struct ethtool_value {
 enum {
 	LED_UNUSED = 0,
 	LED_NET = 1,
+	LED_RUNNING = 2,
 };
 
 struct if_status {
@@ -85,13 +86,14 @@ static struct led leds[3];
 
 /* network socket */
 static int net_sock = -2; /* -2 = unneeded, -1 = needed, >=0 = initialized */
+static int fast_mode = 0; /* start blink fast for running led */
 
 const char usage[] =
   "alix-leds version 1.0 - (C) 2008 - Willy Tarreau <w@1wt.eu>\n"
-  "  Blink LEDs on ALIX motherboards depending on network status.\n"
+  "  Blink LEDs on ALIX motherboards depending on system and network status.\n"
   "\n"
   "Usage:\n"
-  "  # alix-leds { [-l 1|2|3] [-i intf] [-s slave] [-t tun] }*\n"
+  "  # alix-leds { [-l 1|2|3] [-r|-R] [-i intf] [-s slave] [-t tun] }*\n"
   "\n"
   "LEDs 1,2,3 are independently managed. Specify one led, followed by the checks\n"
   "to associate to that LED. Repeat for other leds. Network interface status can\n"
@@ -102,6 +104,8 @@ const char usage[] =
   "  - when <intf> link is down, the LED remains off.\n"
   "  - when <slave> is down or absent, the LED blinks slowly (once per second).\n"
   "  - when <tun> is down or absent, the LED flashes twice a second.\n"
+  "The 'running' more (-r) will slowly blink the led at 1 Hz. Using -R will blink\n"
+  "it at 10 Hz."
   "";
 
 /* if ret < 0, report msg with perror and return -ret.
@@ -213,6 +217,24 @@ static inline void setled(unsigned leds, unsigned mask, unsigned port)
 #endif
 }
 
+void manage_running(struct led *led)
+{
+	switch (led->state) {
+	case 0: led->state = 1;
+		/* fall through */
+	case 1:
+		setled(led->mask, LED_ON, led->port);
+		led->sleep = fast_mode ? SLEEP_1SEC * 5 / 100 : SLEEP_1SEC * 40/100;
+		led->state = 2;
+		break;
+	case 2:
+		setled(led->mask, ~LED_ON, led->port);
+		led->sleep = fast_mode ? SLEEP_1SEC * 5 / 100 : SLEEP_1SEC * 60/100;
+		led->state = 1;
+		break;
+	}
+}
+
 void manage_net(struct led *led)
 {
 #ifdef DEBUG
@@ -320,6 +342,21 @@ int main(int argc, char **argv)
 		/* options with one arg first */
 		if (strcmp(*argv, "-h") == 0)
 			die(0, usage);
+		else if (strcmp(*argv, "-r") == 0) {
+			if (!led)
+				die(1, "Must specify led before running mode");
+			if (led->type != LED_UNUSED && led->type != LED_RUNNING)
+				die(1, "LED already assigned to non-running polling");
+			led->type = LED_RUNNING;
+		}
+		else if (strcmp(*argv, "-R") == 0) {
+			if (!led)
+				die(1, "Must specify led before fast running mode");
+			if (led->type != LED_UNUSED && led->type != LED_RUNNING)
+				die(1, "LED already assigned to non-running polling");
+			led->type = LED_RUNNING;
+			fast_mode = 1;
+		}
 
 		/* options with two args below */
 		else if (argc < 2)
@@ -422,6 +459,9 @@ int main(int argc, char **argv)
 			switch (led->type) {
 			case LED_NET:
 				manage_net(led);
+				break;
+			case LED_RUNNING:
+				manage_running(led);
 				break;
 			}
 		}
