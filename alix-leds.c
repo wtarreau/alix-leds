@@ -69,6 +69,7 @@ enum {
 	LED_NET = 1,
 	LED_RUNNING = 2,
 	LED_CPU = 3,
+	LED_DISK = 4,
 };
 
 struct if_status {
@@ -82,6 +83,11 @@ struct cpu_status {
 	unsigned int cpu_usage;
 };
 
+struct ide_status {
+	unsigned int count[2];
+	unsigned int disk_usage;
+};
+
 struct led {
 	int type;  /* led type (LED_*). 0 = unused */
 	int state; /* internal state. 0 at init. 1 for first state. */
@@ -91,6 +97,7 @@ struct led {
 	char *disk_name;
 	struct if_status intf, slave, tun; /* checked interfaces */
 	struct cpu_status cpu;
+	struct ide_status ide;
 	int count, limit, flash;           /* used for interface status */
 };
 
@@ -106,7 +113,7 @@ const char usage[] =
   "  Blink LEDs on ALIX motherboards depending on system and network status.\n"
   "\n"
   "Usage:\n"
-  "  # alix-leds [-p pidfile] {[-l 1|2|3] [-urR] [-i intf] [-s slave] [-t tun]}*\n"
+  "  # alix-leds [-p pidfile] {[-l 1|2|3] [-durR] [-i intf] [-s slave] [-t tun]}*\n"
   "              [-I]\n"
   "\n"
   "LEDs 1,2,3 are independently managed. Specify one led, followed by the checks\n"
@@ -122,7 +129,7 @@ const char usage[] =
   "it at 10 Hz. SIGUSR1 switches running leds to -r, SIGUSR2 switches them to -R.\n"
   "Use -p to store the daemon's pid into file <pidfile>. The 'usage' mode (-u)\n"
   "reports CPU usage by blinking slower or faster depending on the load. -I sets\n"
-  "scheduling to idle priority (less precise).\n"
+  "scheduling to idle priority (less precise). -d enables monitoring of hard disk.\n"
 #endif
   "";
 
@@ -308,6 +315,97 @@ int update_cpu(struct led *led)
 	return 1;
 }
 
+/* retrieve IDE interrupt counts from /proc/interrupts, and update ide_count[].
+ * Lines with device names beginning with 'ide' and 'pata' are cumulated.
+ * Return 0 if any error, or 1 if values were updated.
+ */
+int update_disk(struct led *led)
+{
+	char buffer[256];
+	FILE *f;
+	char *ptr;
+	unsigned int total, count;
+
+	f = fopen("/proc/interrupts", "r");
+	if (!f)
+		return 0;
+
+	total = 0;
+	while (fgets(buffer, sizeof(buffer), f) != NULL) {
+		/* format : 
+		 * [ 0-9]*:    count   pic   device[, device]
+		 */
+
+		ptr = buffer;
+		while (*ptr != ':') {
+			if (!*ptr || (*ptr != ' ' && !isdigit(*ptr)))
+				goto next_line;
+			ptr++;
+		}
+
+		/* skip the colon and the spaces */
+		while (isspace(*++ptr));
+
+		/* read counter */
+		count = 0;
+		while (isdigit(*ptr)) {
+			count = count*10 + *ptr - '0';
+			ptr++;
+		}
+		if (!*ptr)
+			goto next_line;
+
+		/* skip the spaces */
+		while (isspace(*++ptr));
+		if (!*ptr)
+			goto next_line;
+
+		/* skip the PIT names */
+		while (*ptr && !isspace(*++ptr));
+
+		/* skip the spaces again */
+		while (isspace(*++ptr));
+		if (!*ptr)
+			goto next_line;
+
+		/* OK, we have the device(s) name here. Iterate over all names */
+		while (1) {
+			const char *dev;
+
+			dev = ptr;
+			while (*ptr && *ptr != ',')
+				ptr++;
+
+			if (*ptr)
+				*(ptr++) = 0;
+
+			if (strncmp(dev, "ide", 3) == 0 || strncmp(dev, "pata", 4) == 0)
+				/* got it ! */
+				break;
+
+			if (!*ptr)
+				goto next_line;
+
+			/* skip the comma and spaces again */
+			while (isspace(*++ptr));
+			if (!*ptr)
+				goto next_line;
+		}
+
+		/* if we get here, we found the right line */
+		total += count;
+	next_line:
+		;
+	}
+	fclose(f);
+
+	led->ide.count[0] = led->ide.count[1];
+	led->ide.count[1] = total;
+	led->ide.disk_usage = led->ide.count[1] - led->ide.count[0];
+
+	return 1;
+}
+
 
 static inline void setled(unsigned leds, unsigned mask, unsigned port)
 {
@@ -316,15 +414,53 @@ static inline void setled(unsigned leds, unsigned mask, unsigned port)
 #endif
 }
 
+void manage_disk(struct led *led)
+{
+	if (led->state == 0) {
+		setled(led->mask, ~LED_ON, led->port);
+		if (update_disk(led))
+			led->state = 1;
+		led->sleep = SLEEP_1SEC * 250/1000;
+		/* we need two measures */
+		return;
+	}
+
+	/* just check stats at the beginning of a period */
+	if (led->state <= 2)
+		update_disk(led);
+
+	/* do not switch led status during intermediate states */
+	if (led->state == 1 || led->state == 3)
+		led->state = (led->ide.disk_usage) ? 2 : 1;
+	else
+		led->state++;
+
+	/* We want 100ms ON/25ms OFF every time we see disk activity */
+	switch (led->state) {
+	case 1: /* led is off for at least 250 ms */
+		setled(led->mask, ~LED_ON, led->port);
+		led->sleep = (SLEEP_1SEC * 250/1000);
+		break;
+	case 2: /* led is ON */
+		setled(led->mask, LED_ON, led->port);
+		led->sleep = (SLEEP_1SEC * 100/1000);
+		break;
+	case 3: /* led flashes OFF */
+		setled(led->mask, ~LED_ON, led->port);
+		led->sleep = (SLEEP_1SEC * 25/1000);
+		break;
+	}
+}
+
 void manage_cpu(struct led *led)
 {
 	if (led->state == 0) {
-		/* we want a valid first measure */
 		if (update_cpu(led))
 			led->state = 1;
-		led->sleep = SLEEP_1SEC / 2;
 		led->count = 0;
 		led->limit = 1;
+		/* we need two measures */
+		led->sleep = SLEEP_1SEC / 2;
 		return;
 	}
 
@@ -511,6 +647,13 @@ int main(int argc, char **argv)
 		/* options with one arg first */
 		if (argv[0][1] == 'h')
 			die(0, usage);
+		else if (argv[0][1] == 'd') {
+			if (!led)
+				die(1, "Must specify led before disk mode");
+			if (led->type != LED_UNUSED && led->type != LED_DISK)
+				die(1, "LED already assigned to non-disk polling");
+			led->type = LED_DISK;
+		}
 		else if (argv[0][1] == 'u') {
 			if (!led)
 				die(1, "Must specify led before cpu mode");
@@ -685,6 +828,9 @@ int main(int argc, char **argv)
 				break;
 			case LED_CPU:
 				manage_cpu(led);
+				break;
+			case LED_DISK:
+				manage_disk(led);
 				break;
 			}
 		}
