@@ -349,7 +349,7 @@ int main(int argc, char **argv)
 	const char *last_interf = NULL;
 	const char *pidname = NULL;
 	FILE *pidfile = NULL;
-	int pid;
+	int pid, fd;
 
 	/* cheaper than pre-initializing the array in the .data section */
 	init_leds(leds);
@@ -462,7 +462,12 @@ int main(int argc, char **argv)
 	}
 
 	chdir("/");
-	close(0); close(1); close(2);
+
+	/* close only stdin/stdout/stderr (not dgram socket or pidfile) */
+	for (fd = 0; fd < 1024; fd++)
+		if (net_sock != fd && (!pidfile || fd != fileno(pidfile)))
+			close(fd);
+
 	pid = fork();
 	if (pid > 0)
 		if (pidfile)
