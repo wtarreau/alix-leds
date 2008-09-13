@@ -3,13 +3,11 @@
  * Blink LEDs on ALIX motherboards depending on network status.
  * Redistribute under GPLv2.
  *
- * Usage:
- *   alix-leds { [-l 1|2|3] [-urR] [-i intf] [-s slave] [-t tun] }*
- *
  * For more info, check the "usage" help string below.
  */
 
 #include <ctype.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -101,6 +99,7 @@ const char usage[] =
   "\n"
   "Usage:\n"
   "  # alix-leds [-p pidfile] {[-l 1|2|3] [-urR] [-i intf] [-s slave] [-t tun]}*\n"
+  "              [-I]\n"
   "\n"
   "LEDs 1,2,3 are independently managed. Specify one led, followed by the checks\n"
   "to associate to that LED. Repeat for other leds. Network interface status can\n"
@@ -114,7 +113,8 @@ const char usage[] =
   "The 'running' more (-r) will slowly blink the led at 1 Hz. Using -R will blink\n"
   "it at 10 Hz. SIGUSR1 switches running leds to -r, SIGUSR2 switches them to -R.\n"
   "Use -p to store the daemon's pid into file <pidfile>. The 'usage' mode (-u)\n"
-  "reports CPU usage by blinking slower or faster depending on the load."
+  "reports CPU usage by blinking slower or faster depending on the load. -I sets\n"
+  "scheduling to idle priority (less precise).\n"
   "";
 
 /* if ret < 0, report msg with perror and return -ret.
@@ -355,12 +355,6 @@ void manage_running(struct led *led)
 
 void manage_net(struct led *led)
 {
-#ifdef DEBUG
-	printf("manage_net: led=%p, state=%d count=%d limit=%d flash=%d intf=%d slave=%d tun=%d\n",
-	       led, led->state, led->count, led->limit, led->flash,
-	       led->intf.status, led->slave.status, led->tun.status);
-#endif
-	
 	switch (led->state) {
 	case 0: led->state = 1;
 		/* fall through */
@@ -409,6 +403,12 @@ void manage_net(struct led *led)
 			setled(led->mask, ~LED_ON, led->port);
 			led->sleep = SLEEP_500M;
 		}
+
+#ifdef DEBUG
+		printf("manage_net: led=%p, state=%d count=%d limit=%d flash=%d intf=%d slave=%d tun=%d\n",
+		       led, led->state, led->count, led->limit, led->flash,
+		       led->intf.status, led->slave.status, led->tun.status);
+#endif
 		break;
 	case 2:
 		setled(led->mask, ~LED_ON, led->port);
@@ -467,30 +467,35 @@ int main(int argc, char **argv)
 	const char *pidname = NULL;
 	FILE *pidfile = NULL;
 	int pid, fd;
+	int sched;
+	int prio = 0;
 
 	/* cheaper than pre-initializing the array in the .data section */
 	init_leds(leds);
 
 	argc--; argv++;
 	while (argc > 0) {
+		if (**argv != '-')
+			die(1, usage);
+
 		/* options with one arg first */
-		if (strcmp(*argv, "-h") == 0)
+		if (argv[0][1] == 'h')
 			die(0, usage);
-		else if (strcmp(*argv, "-u") == 0) {
+		else if (argv[0][1] == 'u') {
 			if (!led)
 				die(1, "Must specify led before cpu mode");
 			if (led->type != LED_UNUSED && led->type != LED_CPU)
 				die(1, "LED already assigned to non-cpu polling");
 			led->type = LED_CPU;
 		}
-		else if (strcmp(*argv, "-r") == 0) {
+		else if (argv[0][1] == 'r') {
 			if (!led)
 				die(1, "Must specify led before running mode");
 			if (led->type != LED_UNUSED && led->type != LED_RUNNING)
 				die(1, "LED already assigned to non-running polling");
 			led->type = LED_RUNNING;
 		}
-		else if (strcmp(*argv, "-R") == 0) {
+		else if (argv[0][1] == 'R') {
 			if (!led)
 				die(1, "Must specify led before fast running mode");
 			if (led->type != LED_UNUSED && led->type != LED_RUNNING)
@@ -498,12 +503,14 @@ int main(int argc, char **argv)
 			led->type = LED_RUNNING;
 			fast_mode = 1;
 		}
+		else if (argv[0][1] == 'I')
+			prio = 1;
 
 		/* options with two args below */
 		else if (argc < 2)
 				die(1, usage);
 
-		else if (strcmp(*argv, "-i") == 0) {
+		else if (argv[0][1] == 'i') {
 			if (!led)
 				die(1, "Must specify led before interface");
 			if (led->type != LED_UNUSED && led->type != LED_NET)
@@ -514,7 +521,7 @@ int main(int argc, char **argv)
 			net_sock = -1;
 			argc--; argv++;
 		}
-		else if (strcmp(*argv, "-s") == 0) {
+		else if (argv[0][1] == 's') {
 			if (!led)
 				die(1, "Must specify led before slave");
 			if (led->type != LED_UNUSED && led->type != LED_NET)
@@ -524,7 +531,7 @@ int main(int argc, char **argv)
 			net_sock = -1;
 			argc--; argv++;
 		}
-		else if (strcmp(*argv, "-t") == 0) {
+		else if (argv[0][1] == 't') {
 			if (!led)
 				die(1, "Must specify led before tunnel");
 			if (led->type != LED_UNUSED && led->type != LED_NET)
@@ -534,7 +541,7 @@ int main(int argc, char **argv)
 			net_sock = -1;
 			argc--; argv++;
 		}
-		else if (strcmp(*argv, "-l") == 0) {
+		else if (argv[0][1] == 'l') {
 			int l = atoi(argv[1]);
 			if (l >= 1 && l <= 3)
 				led = &leds[l - 1];
@@ -542,7 +549,7 @@ int main(int argc, char **argv)
 				die(1, usage);
 			argc--; argv++;
 		}
-		else if (strcmp(*argv, "-p") == 0) {
+		else if (argv[0][1] == 'p') {
 			pidname = argv[1];
 			argc--; argv++;
 		}
@@ -569,10 +576,20 @@ int main(int argc, char **argv)
 		}
 	}
 
-	sch.sched_priority = 0;
-	if (sched_setscheduler(0, SCHED_IDLEPRIO, &sch) == -1) {
+	if (prio > 0) {
+		/* set idle priority */
+		prio = 20; // nice value in case of failure
+		sched = SCHED_IDLEPRIO;
+		sch.sched_priority = 0;
+	} else {
+		/* defaults to realtime priority */
+		prio = -19; // nice value in case of failure
+		sched = SCHED_RR;
+		sch.sched_priority = 1;
+	}
+	if (sched_setscheduler(0, sched, &sch) == -1) {
 		sched_setscheduler(0, SCHED_OTHER, &sch);
-		setpriority(PRIO_PROCESS, 0, 20);
+		setpriority(PRIO_PROCESS, 0, prio);
 	}
 
 	signal(SIGUSR1, sig_handler);
