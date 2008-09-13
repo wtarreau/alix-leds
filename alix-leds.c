@@ -3,10 +3,16 @@
  * Blink LEDs on ALIX motherboards depending on network status.
  * Redistribute under GPLv2.
  *
- * For more info, check the "usage" help string below.
+ * To build optimally (add -DQUIET to remove messages) :
+ *  $ diet gcc -fomit-frame-pointer -Wall -Os -Wl,--sort-section=alignment \
+ *         -o alix-leds alix-leds.c 
+ *  $ sstrip alix-leds
+ *
+ * For more info about usage, check the "usage" help string below.
  */
 
 #include <ctype.h>
+#include <fcntl.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -18,6 +24,7 @@
 #include <net/if.h>
 #include <sys/io.h>
 #include <sys/ioctl.h>
+#include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/types.h>
 #include <sys/resource.h>
@@ -90,10 +97,11 @@ struct led {
 static struct led leds[3];
 
 /* network socket */
-static int net_sock = -2; /* -2 = unneeded, -1 = needed, >=0 = initialized */
+static int net_sock  = 0; /* -2 = unneeded, -1 = needed, >=0 = initialized */
 static int fast_mode = 0; /* start blink fast for running led */
 
 const char usage[] =
+#ifndef QUIET
   "alix-leds version 1.0 - (C) 2008 - Willy Tarreau <w@1wt.eu>\n"
   "  Blink LEDs on ALIX motherboards depending on system and network status.\n"
   "\n"
@@ -115,6 +123,7 @@ const char usage[] =
   "Use -p to store the daemon's pid into file <pidfile>. The 'usage' mode (-u)\n"
   "reports CPU usage by blinking slower or faster depending on the load. -I sets\n"
   "scheduling to idle priority (less precise).\n"
+#endif
   "";
 
 /* if ret < 0, report msg with perror and return -ret.
@@ -122,8 +131,9 @@ const char usage[] =
  * if ret == 0, return msg on stdout and return 0.
  * if msg is NULL, nothing is reported.
  */
-void die(int ret, const char *msg)
+static inline void die(int ret, const char *msg)
 {
+#ifndef QUIET
 	if (ret < 0) {
 		ret = -ret;
 		if (msg)
@@ -137,7 +147,26 @@ void die(int ret, const char *msg)
 		if (msg)
 			printf("%s\n", msg);
 	}
+#endif
 	exit(ret);
+}
+
+/*
+ * This function simply returns a locally allocated string containing
+ * the ascii representation for number 'n' in decimal.
+ */
+static inline const char *ultoa_r(unsigned long n, char *buffer, int size)
+{
+	char *pos;
+
+	pos = buffer + size - 1;
+	*pos-- = '\0';
+
+	do {
+		*pos-- = '0' + n % 10;
+		n /= 10;
+	} while (n && pos >= buffer);
+	return pos + 1;
 }
 
 /* return link status for interface <dev> using socket <sock>.
@@ -465,13 +494,14 @@ int main(int argc, char **argv)
 	struct led *led = NULL;
 	const char *last_interf = NULL;
 	const char *pidname = NULL;
-	FILE *pidfile = NULL;
+	int pidfd = 0;
 	int pid, fd;
 	int sched;
 	int prio = 0;
 
 	/* cheaper than pre-initializing the array in the .data section */
 	init_leds(leds);
+	net_sock = -2; /* uninitialized */
 
 	argc--; argv++;
 	while (argc > 0) {
@@ -597,8 +627,8 @@ int main(int argc, char **argv)
 
 #ifndef DEBUG
 	if (pidname) {
-		pidfile = fopen(pidname, "w");
-		if (!pidfile)
+		pidfd = open(pidname, O_WRONLY|O_CREAT|O_TRUNC);
+		if (pidfd < 0)
 			die(-4, "Failed to open pidfile");
 	}
 
@@ -606,15 +636,22 @@ int main(int argc, char **argv)
 
 	/* close only stdin/stdout/stderr (not dgram socket or pidfile) */
 	for (fd = 0; fd < 1024; fd++)
-		if (net_sock != fd && (!pidfile || fd != fileno(pidfile)))
+		if (net_sock != fd && (!pidname || fd != pidfd))
 			close(fd);
 
 	pid = fork();
-	if (pid > 0)
-		if (pidfile)
-			fprintf(pidfile, "%d\n", pid);
-	if (pidfile)
-		fclose(pidfile);
+	if (pid > 0 && pidname) {
+		char buffer[21];
+		char *ret;
+		int len;
+
+		ret = (char *)ultoa_r(pid, buffer, sizeof(buffer));
+		len = strlen(ret);
+		ret[len] = '\n';
+		write(pidfd, ret, len + 1);
+	}
+	if (pidname)
+		close(pidfd);
 
 	if (pid != 0)
 		exit(0);
