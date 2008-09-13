@@ -93,7 +93,7 @@ const char usage[] =
   "  Blink LEDs on ALIX motherboards depending on system and network status.\n"
   "\n"
   "Usage:\n"
-  "  # alix-leds { [-l 1|2|3] [-r|-R] [-i intf] [-s slave] [-t tun] }*\n"
+  "  # alix-leds [-p pidfile] {[-l 1|2|3] [-r|-R] [-i intf] [-s slave] [-t tun]}*\n"
   "\n"
   "LEDs 1,2,3 are independently managed. Specify one led, followed by the checks\n"
   "to associate to that LED. Repeat for other leds. Network interface status can\n"
@@ -105,7 +105,8 @@ const char usage[] =
   "  - when <slave> is down or absent, the LED blinks slowly (once per second).\n"
   "  - when <tun> is down or absent, the LED flashes twice a second.\n"
   "The 'running' more (-r) will slowly blink the led at 1 Hz. Using -R will blink\n"
-  "it at 10 Hz."
+  "it at 10 Hz.\n"
+  "Use -p to store the daemon's pid into file <pidfile>.\n"
   "";
 
 /* if ret < 0, report msg with perror and return -ret.
@@ -333,6 +334,9 @@ int main(int argc, char **argv)
 	struct sched_param sch;
 	struct led *led = NULL;
 	const char *last_interf = NULL;
+	const char *pidname = NULL;
+	FILE *pidfile = NULL;
+	int pid;
 
 	/* cheaper than pre-initializing the array in the .data section */
 	init_leds(leds);
@@ -401,6 +405,10 @@ int main(int argc, char **argv)
 				die(1, usage);
 			argc--; argv++;
 		}
+		else if (strcmp(*argv, "-p") == 0) {
+			pidname = argv[1];
+			argc--; argv++;
+		}
 		else
 			die(1, usage);
 		argc--; argv++;
@@ -431,9 +439,22 @@ int main(int argc, char **argv)
 	}
 
 #ifndef DEBUG
+	if (pidname) {
+		pidfile = fopen(pidname, "w");
+		if (!pidfile)
+			die(-4, "Failed to open pidfile");
+	}
+
 	chdir("/");
 	close(0); close(1); close(2);
-	if (fork() != 0)
+	pid = fork();
+	if (pid > 0)
+		if (pidfile)
+			fprintf(pidfile, "%d\n", pid);
+	if (pidfile)
+		fclose(pidfile);
+
+	if (pid != 0)
 		exit(0);
 #endif
 
