@@ -215,37 +215,6 @@ static inline void setled(unsigned leds, unsigned mask, unsigned port)
 
 void manage_net(struct led *led)
 {
-	if_exist(&led->intf, &led->slave, &led->tun);
-	led->intf.status = !led->intf.name ||
-		(led->intf.present &&
-		 (if_up(net_sock, led->intf.name) == 1) &&
-		 (glink(net_sock, led->intf.name) == 1));
-	
-	led->slave.status = !led->slave.name ||
-		(led->slave.present &&
-		 (if_up(net_sock, led->slave.name) == 1));
-	
-	led->tun.status = !led->tun.name ||
-		(led->tun.present &&
-		 (if_up(net_sock, led->tun.name) == 1));
-
-	if (led->intf.status && led->slave.status && led->tun.status) {
-		led->limit = MAXSTEPS; // always on if eth & slave & tun UP
-		led->flash = 0;
-	}
-	else if (led->intf.status && led->slave.status) {
-		led->limit = MAXSTEPS; // flashes if eth & slave UP
-		led->flash = 1;
-	}
-	else if (led->intf.status) {
-		led->limit = MAXSTEPS/2;  // 50% ON/OFF if only eth UP
-		led->flash = 0;
-	}
-	else {
-		led->limit = 0;  // always off if eth DOWN
-		led->flash = 0;
-	}
-
 #ifdef DEBUG
 	printf("manage_net: led=%p, state=%d count=%d limit=%d flash=%d intf=%d slave=%d tun=%d\n",
 	       led, led->state, led->count, led->limit, led->flash,
@@ -256,6 +225,37 @@ void manage_net(struct led *led)
 	case 0: led->state = 1;
 		/* fall through */
 	case 1:
+		if_exist(&led->intf, &led->slave, &led->tun);
+		led->intf.status = !led->intf.name ||
+			(led->intf.present &&
+			 (if_up(net_sock, led->intf.name) == 1) &&
+			 (glink(net_sock, led->intf.name) == 1));
+	
+		led->slave.status = !led->slave.name ||
+			(led->slave.present &&
+			 (if_up(net_sock, led->slave.name) == 1));
+	
+		led->tun.status = !led->tun.name ||
+			(led->tun.present &&
+			 (if_up(net_sock, led->tun.name) == 1));
+
+		if (led->intf.status && led->slave.status && led->tun.status) {
+			led->limit = MAXSTEPS; // always on if eth & slave & tun UP
+			led->flash = 0;
+		}
+		else if (led->intf.status && led->slave.status) {
+			led->limit = MAXSTEPS; // flashes if eth & slave UP
+			led->flash = 1;
+		}
+		else if (led->intf.status) {
+			led->limit = MAXSTEPS/2;  // 50% ON/OFF if only eth UP
+			led->flash = 0;
+		}
+		else {
+			led->limit = 0;  // always off if eth DOWN
+			led->flash = 0;
+		}
+
 		if (led->count == MAXSTEPS-1 && led->flash) {
 			setled(led->mask, LED_ON, led->port);
 			led->sleep = SLEEP_500M * 45/100;
@@ -283,10 +283,6 @@ void manage_net(struct led *led)
 	case 4:
 		setled(led->mask, ~LED_ON, led->port);
 		led->sleep = SLEEP_500M * 15/100;
-		led->state = 5;
-		break;
-	case 5:
-		setled(led->mask, LED_ON, led->port);
 		led->state = 1;
 		break;
 	}
