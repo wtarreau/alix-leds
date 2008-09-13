@@ -4,11 +4,9 @@
  * Redistribute under GPLv2.
  *
  * Usage:
- *   alix-leds [-e eth] [-p ppp] [-t tun]   (defaults: eth2, ppp0 and tun0)
+ *   alix-leds { [-l 1|2|3] [-i intf] [-s slave] [-t tun] }*
  *
- * Led3 will be off when eth is down, will slowly blink when eth is up and ppp
- * down, and will emit two quick flashes when eth&ppp are up but tun is down.
- * Otherwise, if all are up, it will remain lit.
+ * For more info, check the "usage" help string below.
  */
 
 #include <ctype.h>
@@ -23,23 +21,31 @@
 #include <sys/io.h>
 #include <sys/ioctl.h>
 #include <sys/time.h>
-//#include <sys/types.h>
+#include <sys/types.h>
 #include <sys/resource.h>
 
 #include <linux/types.h>
 #include <linux/sockios.h>
-#include <linux/ethtool.h>
 
+/* for passing single values */
+struct ethtool_value {
+        __u32     cmd;
+        __u32     data;
+};
 
-#undef SCHED_IDLEPRIO
-#define SCHED_IDLEPRIO  5
+#define ETHTOOL_GLINK 0xa
 
 #ifndef SIOCETHTOOL
 #define SIOCETHTOOL     0x8946
 #endif
 
-#define SLEEPTIME 500000
-#define MAXSTEPS  2
+#undef SCHED_IDLEPRIO
+#define SCHED_IDLEPRIO  5
+
+/* sleep 1 second max */
+#define MAXSLEEP   1000000
+#define SLEEP_1SEC 1000000
+#define SLEEP_500M  500000
 
 /* ALIX leds */
 #define LED1_PORT 0x6100
@@ -50,26 +56,52 @@
 #define LED3_MASK 0x08000800
 #define LED_ON    0xFFFF0000
 
+/* used by network leds */
+#define MAXSTEPS  2
+
+enum {
+	LED_UNUSED = 0,
+	LED_NET = 1,
+};
+
 struct if_status {
 	const char *name;
 	int present;
 	int status;
 };
 
+struct led {
+	int type;  /* led type (LED_*). 0 = unused */
+	int state; /* internal state. 0 at init. 1 for first state. */
+	int sleep; /* sleep time in ms */
+	unsigned int port; /* I/O port */
+	unsigned int mask; /* on/off mask */
+	char *disk_name;
+	struct if_status intf, slave, tun; /* checked interfaces */
+	int count, limit, flash;           /* used for interface status */
+};
+
+static struct led leds[3];
+
+/* network socket */
+static int net_sock = -2; /* -2 = unneeded, -1 = needed, >=0 = initialized */
+
 const char usage[] =
   "alix-leds version 1.0 - (C) 2008 - Willy Tarreau <w@1wt.eu>\n"
   "  Blink LEDs on ALIX motherboards depending on network status.\n"
   "\n"
   "Usage:\n"
-  "  # alix-leds [-l 1|2|3] [-e eth] [-p ppp] [-t tun]\n"
-  "    Defaults to: -l 3 -e eth2\n"
-  "    Unspecified interfaces are ignored (considered up).\n"
+  "  # alix-leds { [-l 1|2|3] [-i intf] [-s slave] [-t tun] }*\n"
   "\n"
-  "Reported status :\n"
-  "  - when all interfaces are down, the LED remains off.\n"
-  "  - when the eth interface is up, the LED blinks slowly (once per second).\n"
-  "  - when the ppp interface is up, the LED flashes twice a second.\n"
+  "LEDs 1,2,3 are independently managed. Specify one led, followed by the checks\n"
+  "to associate to that LED. Repeat for other leds. Network interface status can\n"
+  "report up to 3 interfaces per LED : a physical interface with link checking, a\n"
+  "slave interface (eg: ppp), and a tunnel interface, in this priority order. Any\n"
+  "unspecified interface is considered up. Network status is reported as follows :\n"
   "  - when all interfaces are up, the LED remains lit.\n"
+  "  - when <intf> link is down, the LED remains off.\n"
+  "  - when <slave> is down or absent, the LED blinks slowly (once per second).\n"
+  "  - when <tun> is down or absent, the LED flashes twice a second.\n"
   "";
 
 /* if ret < 0, report msg with perror and return -ret.
@@ -137,6 +169,7 @@ int if_up(int sock, const char *dev)
 int if_exist(struct if_status *if1, struct if_status *if2, struct if_status *if3)
 {
 	char buffer[256];
+	struct if_status *ifs[3] = {if1, if2, if3};
 	FILE *f;
 	int ret = 0;
 
@@ -149,6 +182,7 @@ int if_exist(struct if_status *if1, struct if_status *if2, struct if_status *if3
 
 	while (fgets(buffer, sizeof(buffer), f) != NULL) {
 		char *name, *colon;
+		int ifnum;
 
 		name = buffer;
 		while (isspace(*name))
@@ -161,81 +195,178 @@ int if_exist(struct if_status *if1, struct if_status *if2, struct if_status *if3
 			continue;
 		*(colon++) = 0;
 
-		if (*if1->name && strcmp(name, if1->name) == 0) {
-			if1->present = 1;
-			ret++;
-		}
-		if (*if2->name && strcmp(name, if2->name) == 0) {
-			if2->present = 1;
-			ret++;
-		}
-		if (*if3->name && strcmp(name, if3->name) == 0) {
-			if3->present = 1;
-			ret++;
+		for (ifnum = 0; ifnum < 3; ifnum++) {
+			if (ifs[ifnum]->name && strcmp(name, ifs[ifnum]->name) == 0) {
+				ifs[ifnum]->present = 1;
+				ret++;
+			}
 		}
 	}
 	fclose(f);
 	return ret;
 }
 
-void setled(unsigned leds, unsigned mask, unsigned port)
+static inline void setled(unsigned leds, unsigned mask, unsigned port)
 {
+#ifndef DEBUG
 	outl(leds & mask, port);
+#endif
+}
+
+void manage_net(struct led *led)
+{
+	if_exist(&led->intf, &led->slave, &led->tun);
+	led->intf.status = !led->intf.name ||
+		(led->intf.present &&
+		 (if_up(net_sock, led->intf.name) == 1) &&
+		 (glink(net_sock, led->intf.name) == 1));
+	
+	led->slave.status = !led->slave.name ||
+		(led->slave.present &&
+		 (if_up(net_sock, led->slave.name) == 1));
+	
+	led->tun.status = !led->tun.name ||
+		(led->tun.present &&
+		 (if_up(net_sock, led->tun.name) == 1));
+
+	if (led->intf.status && led->slave.status && led->tun.status) {
+		led->limit = MAXSTEPS; // always on if eth & slave & tun UP
+		led->flash = 0;
+	}
+	else if (led->intf.status && led->slave.status) {
+		led->limit = MAXSTEPS; // flashes if eth & slave UP
+		led->flash = 1;
+	}
+	else if (led->intf.status) {
+		led->limit = MAXSTEPS/2;  // 50% ON/OFF if only eth UP
+		led->flash = 0;
+	}
+	else {
+		led->limit = 0;  // always off if eth DOWN
+		led->flash = 0;
+	}
+
+#ifdef DEBUG
+	printf("manage_net: led=%p, state=%d count=%d limit=%d flash=%d intf=%d slave=%d tun=%d\n",
+	       led, led->state, led->count, led->limit, led->flash,
+	       led->intf.status, led->slave.status, led->tun.status);
+#endif
+	
+	switch (led->state) {
+	case 0: led->state = 1;
+		/* fall through */
+	case 1:
+		if (led->count == MAXSTEPS-1 && led->flash) {
+			setled(led->mask, LED_ON, led->port);
+			led->sleep = SLEEP_500M * 45/100;
+			led->state = 2;
+		}
+		else if (led->count < led->limit) {
+			setled(led->mask, LED_ON, led->port);
+			led->sleep = SLEEP_500M;
+		}
+		else {
+			setled(led->mask, ~LED_ON, led->port);
+			led->sleep = SLEEP_500M;
+		}
+		break;
+	case 2:
+		setled(led->mask, ~LED_ON, led->port);
+		led->sleep = SLEEP_500M * 15/100;
+		led->state = 3;
+		break;
+	case 3:
+		setled(led->mask, LED_ON, led->port);
+		led->sleep = SLEEP_500M * 25/100;
+		led->state = 4;
+		break;
+	case 4:
+		setled(led->mask, ~LED_ON, led->port);
+		led->sleep = SLEEP_500M * 15/100;
+		led->state = 5;
+		break;
+	case 5:
+		setled(led->mask, LED_ON, led->port);
+		led->state = 1;
+		break;
+	}
+
+	if (led->state == 1) {
+		led->count++;
+		if (led->count >= MAXSTEPS)
+			led->count = 0;
+	}
+}
+
+static inline void init_leds(struct led *led)
+{
+	led[0].port = LED1_PORT;
+	led[0].mask = LED1_MASK;
+
+	led[1].port = LED2_PORT;
+	led[1].mask = LED2_MASK;
+
+	led[2].port = LED3_PORT;
+	led[2].mask = LED3_MASK;
 }
 
 int main(int argc, char **argv)
 {
-	int sock;
-	int count, limit, flash;
 	struct sched_param sch;
+	struct led *led = NULL;
+	const char *last_interf = NULL;
 
-	struct if_status eth = { .name = "eth2"};
-	struct if_status ppp = { .name = ""};
-	struct if_status tun = { .name = ""};
-
-	unsigned int port   = LED3_PORT;
-	unsigned int leds   = LED3_MASK;
+	/* cheaper than pre-initializing the array in the .data section */
+	init_leds(leds);
 
 	argc--; argv++;
 	while (argc > 0) {
+		/* options with one arg first */
 		if (strcmp(*argv, "-h") == 0)
 			die(0, usage);
 
 		/* options with two args below */
-		if (argc < 2)
-			die(1, usage);
+		else if (argc < 2)
+				die(1, usage);
 
-		if (strcmp(*argv, "-e") == 0) {
-			eth.name = argv[1];
+		else if (strcmp(*argv, "-i") == 0) {
+			if (!led)
+				die(1, "Must specify led before interface");
+			if (led->type != LED_UNUSED && led->type != LED_NET)
+				die(1, "LED already assigned to non-net polling");
+			led->type = LED_NET;
+			led->intf.name = argv[1];
+			last_interf = argv[1];
+			net_sock = -1;
 			argc--; argv++;
 		}
-		else if (strcmp(*argv, "-p") == 0) {
-			ppp.name = argv[1];
+		else if (strcmp(*argv, "-s") == 0) {
+			if (!led)
+				die(1, "Must specify led before slave");
+			if (led->type != LED_UNUSED && led->type != LED_NET)
+				die(1, "LED already assigned to non-net polling");
+			led->type = LED_NET;
+			led->slave.name = argv[1];
+			net_sock = -1;
 			argc--; argv++;
 		}
 		else if (strcmp(*argv, "-t") == 0) {
-			tun.name = argv[1];
+			if (!led)
+				die(1, "Must specify led before tunnel");
+			if (led->type != LED_UNUSED && led->type != LED_NET)
+				die(1, "LED already assigned to non-net polling");
+			led->type = LED_NET;
+			led->tun.name = argv[1];
+			net_sock = -1;
 			argc--; argv++;
 		}
 		else if (strcmp(*argv, "-l") == 0) {
 			int l = atoi(argv[1]);
-			argc--; argv++;
-			switch (l) {
-			case 1:
-				leds = LED1_MASK;
-				port = LED1_PORT;
-				break;
-			case 2:
-				leds = LED2_MASK;
-				port = LED2_PORT;
-				break;
-			case 3:
-				leds = LED3_MASK;
-				port = LED3_PORT;
-				break;
-			default:
+			if (l >= 1 && l <= 3)
+				led = &leds[l - 1];
+			else
 				die(1, usage);
-			}
+			argc--; argv++;
 		}
 		else
 			die(1, usage);
@@ -243,14 +374,22 @@ int main(int argc, char **argv)
 	}
 
 	if (iopl(3) == -1)
+#ifndef DEBUG
 		die(-1, "Cannot get I/O port");
-
-	sock = socket(PF_INET, SOCK_DGRAM, 0);
-	if (sock < 0)
-		die(-2, "Failed to get socket");
-
-	if (glink(sock, eth.name) == -1 && errno == EPERM)
-		die(-3, "Failed to get link status");
+#else
+	;
+#endif
+	if (net_sock == -1) {
+		/* at least one interface requires network status */
+		net_sock = socket(PF_INET, SOCK_DGRAM, 0);
+		if (net_sock < 0)
+			die(-2, "Failed to get socket");
+		if (last_interf) {
+			/* if we want to monitor netlink, we may need some privileges */
+			if (glink(net_sock, last_interf) == -1 && errno == EPERM)
+				die(-3, "Failed to get link status");
+		}
+	}
 
 	sch.sched_priority = 0;
 	if (sched_setscheduler(0, SCHED_IDLEPRIO, &sch) == -1) {
@@ -265,74 +404,49 @@ int main(int argc, char **argv)
 		exit(0);
 #endif
 
-	/* This part runs in background */
-	count = limit = flash = 0;
+	/* mini-scheduler
+	 * This one is only based on delays and not deadlines. This makes it
+	 * simpler and more robust against time changes. However it is not
+	 * scalable and should never process hundreds of tasks.
+	 */
 	while (1) {
-		if_exist(&eth, &ppp, &tun);
-		eth.status = !(*eth.name) ||
-			(eth.present &&
-			 (if_up(sock, eth.name) == 1) &&
-			 (glink(sock, eth.name) == 1));
+		int led_num;
+		int sleep_time = MAXSLEEP;
 
-		ppp.status = !(*ppp.name) ||
-			(ppp.present &&
-			 (if_up(sock, ppp.name) == 1));
+		for (led_num = 0; led_num < 3; led_num++) {
+			led = &leds[led_num];
 
-		tun.status = !(*tun.name) ||
-			(tun.present &&
-			 (if_up(sock, tun.name) == 1));
+			if (led->type == LED_UNUSED)
+				continue;
 
-		if (eth.status && ppp.status && tun.status) {
-			limit = MAXSTEPS; // always on if eth & ppp & tun UP
-			flash = 0;
-		}
-		else if (eth.status && ppp.status) {
-			limit = MAXSTEPS; // flashes if eth & ppp UP
-			flash = 1;
-		}
-		else if (eth.status) {
-			limit = MAXSTEPS/2;  // 50% ON/OFF if only eth UP
-			flash = 0;
-		}
-		else {
-			limit = 0;  // always off if eth DOWN
-			flash = 0;
+			if (led->sleep > 0)
+				continue;
+
+			/* led timer expired */
+			switch (led->type) {
+			case LED_NET:
+				manage_net(led);
+				break;
+			}
 		}
 
-#ifdef DEBUG
-		printf("eth0: %d eth1: %d eth2: %d ppp0: %d\n",
-		       glink(sock, "eth0"),
-		       glink(sock, "eth1"),
-		       glink(sock, "eth2"),
-		       glink(sock, "ppp0"));
-		printf("eth=%d ppp=%d tun=%d => flash=%d count=%d, limit=%d, status=%d\n",
-		       eth.status, ppp.status, tun.status,
-		       flash, count, limit, count<limit);
-		usleep(SLEEPTIME);
-#else
-		if (count == MAXSTEPS-1 && flash) {
-			setled(leds, LED_ON, port);
-			usleep(SLEEPTIME * 45/100);
-			setled(leds, ~LED_ON, port);
-			usleep(SLEEPTIME * 15/100);
-			setled(leds, LED_ON, port);
-			usleep(SLEEPTIME * 25/100);
-			setled(leds, ~LED_ON, port);
-			usleep(SLEEPTIME * 15/100);
-			setled(leds, LED_ON, port);
+		for (led_num = 0; led_num < 3; led_num++) {
+			led = &leds[led_num];
+			if (led->type != LED_UNUSED && led->sleep < sleep_time)
+				sleep_time = led->sleep;
 		}
-		else if (count < limit) {
-			setled(leds, LED_ON, port);
-			usleep(SLEEPTIME);
-		}
-		else {
-			setled(leds, ~LED_ON, port);
-			usleep(SLEEPTIME);
-		}
-#endif
 
-		count++;
-		if (count >= MAXSTEPS)
-			count = 0;
+		if (sleep_time > 1000000)
+			sleep_time = 1000000;
+
+		/* Sleep and ignore signals. We will drift but its not dramatic */
+		while (usleep(sleep_time) != 0 && errno == EINTR);
+
+		/* update all leds' sleep time */
+		for (led_num = 0; led_num < 3; led_num++) {
+			led = &leds[led_num];
+			if (led->type != LED_UNUSED)
+				led->sleep -= sleep_time;
+		}		
 	}
 }
