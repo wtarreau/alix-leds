@@ -1,5 +1,5 @@
 /*
- * alix-leds version 1.0 - (C) 2008 - Willy Tarreau <w@1wt.eu>
+ * alix-leds version 2.0 - (C) 2008 - Willy Tarreau <w@1wt.eu>
  * Blink LEDs on ALIX motherboards depending on network status.
  * Redistribute under GPLv2.
  *
@@ -109,7 +109,7 @@ static int fast_mode = 0; /* start blink fast for running led */
 
 const char usage[] =
 #ifndef QUIET
-  "alix-leds version 1.0 - (C) 2008 - Willy Tarreau <w@1wt.eu>\n"
+  "alix-leds version 2.0 - (C) 2008 - Willy Tarreau <w@1wt.eu>\n"
   "  Blink LEDs on ALIX motherboards depending on system and network status.\n"
   "\n"
   "Usage:\n"
