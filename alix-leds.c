@@ -133,6 +133,15 @@ const char usage[] =
 #endif
   "";
 
+/* prints message <msg> + one LF to fd <fd> without buffering.
+ * <msg> cannot be NULL.
+ */
+static void fdputs(int fd, const char *msg)
+{
+	write(fd, msg, strlen(msg));
+	write(fd, "\n", 1);
+}
+
 /* if ret < 0, report msg with perror and return -ret.
  * if ret > 0, return msg on stderr and return ret
  * if ret == 0, return msg on stdout and return 0.
@@ -146,13 +155,8 @@ static inline void die(int ret, const char *msg)
 		if (msg)
 			perror(msg);
 	}
-	else if (ret > 0) {
-		if (msg)
-			fprintf(stderr, "%s\n", msg);
-	}
-	else if (ret == 0) {
-		if (msg)
-			printf("%s\n", msg);
+	else if (msg) {
+		fdputs((ret == 0) ? 1 : 2, msg);
 	}
 #endif
 	exit(ret);
