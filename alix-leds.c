@@ -174,17 +174,24 @@ static const char *errmsg(int err)
 	return "Unknown error";
 }
 
+static void fdprint(int fd, const char *msg)
+{
+	const char *p = msg - 1;
+	while (*(++p));
+	write(fd, msg, p - msg);
+}
+
 /* prints message <msg> + one LF to fd <fd> without buffering.
  * <msg> cannot be NULL.
  */
 static void fdperror(int fd, const char *msg)
 {
 	int err = errno;
-	write(fd, msg, strlen(msg));
-	write(fd, ": ", 2);
+	fdprint(fd, msg);
+	fdprint(fd, ": ");
 	msg = errmsg(err);
-	write(fd, msg, strlen(msg));
-	write(fd, "\n", 1);
+	fdprint(fd, msg);
+	fdprint(fd, "\n");
 }
 
 /* prints message <msg> + one LF to fd <fd> without buffering.
@@ -192,8 +199,8 @@ static void fdperror(int fd, const char *msg)
  */
 static void fdputs(int fd, const char *msg)
 {
-	write(fd, msg, strlen(msg));
-	write(fd, "\n", 1);
+	fdprint(fd, msg);
+	fdprint(fd, "\n");
 }
 
 /* if ret < 0, report msg with perror and return -ret.
@@ -845,12 +852,9 @@ int main(int argc, char **argv)
 	if (pid > 0 && pidname) {
 		char buffer[21];
 		char *ret;
-		int len;
 
 		ret = (char *)ultoa_r(pid, buffer, sizeof(buffer));
-		len = strlen(ret);
-		ret[len] = '\n';
-		write(pidfd, ret, len + 1);
+		fdputs(pidfd, ret);
 	}
 	if (pidname)
 		close(pidfd);
