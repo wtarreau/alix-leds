@@ -203,6 +203,46 @@ static void fdputs(int fd, const char *msg)
 	fdprint(fd, "\n");
 }
 
+/* open file <name> for read, read the maximum of it into <buffer>, but not
+ * more than <size> bytes. A terminating zero is always added after a read
+ * succeeds. The zero lies within <size> but is not counted in the return
+ * value. The number of bytes read is returned. Zero is returned if the file
+ * was empty, <0 is returned in case of any error.
+ */
+static int readfile(const char *name, char *buffer, int size)
+{
+	int fd, ret;
+	char *orig;
+
+	fd = ret = open(name, O_RDONLY);
+	if (ret < 0)
+		goto out;
+
+	orig = buffer;
+	do {
+		ret = read(fd, buffer, size);
+		if (ret < 0)
+			goto out_close;
+		if (ret == 0)
+			break;
+		size -= ret;
+		buffer += ret;
+	} while (size > 0);
+
+	/* we always want to stuff the terminating zero, even if that implies
+	 * to truncate the result.
+	 */
+	if (!size)
+		buffer--;
+	ret = buffer - orig;
+	*buffer = 0;
+
+ out_close:
+	close(fd);
+ out:
+	return ret;
+}
+
 /* if ret < 0, report msg with perror and return -ret.
  * if ret > 0, return msg on stderr and return ret
  * if ret == 0, return msg on stdout and return 0.
