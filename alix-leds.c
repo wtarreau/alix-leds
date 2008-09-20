@@ -133,6 +133,60 @@ const char usage[] =
 #endif
   "";
 
+/* common error messages */
+static const struct {
+	int err;
+	const char *str;
+} errstr[] = {
+	{ .err = EACCES         , .str = "EACCES" },
+	{ .err = EAFNOSUPPORT   , .str = "EAFNOSUPPORT" },
+	{ .err = EEXIST         , .str = "EEXIST" },
+	{ .err = EFAULT         , .str = "EFAULT" },
+	{ .err = EFBIG          , .str = "EFBIG" },
+	{ .err = EINVAL         , .str = "EINVAL" },
+	{ .err = EISDIR         , .str = "EISDIR" },
+	{ .err = ELOOP          , .str = "ELOOP" },
+	{ .err = EMFILE         , .str = "EMFILE" },
+	{ .err = ENAMETOOLONG   , .str = "ENAMETOOLONG" },
+	{ .err = ENFILE         , .str = "ENFILE" },
+	{ .err = ENOBUFS        , .str = "ENOBUFS" },
+	{ .err = ENODEV         , .str = "ENODEV" },
+	{ .err = ENOENT         , .str = "ENOENT" },
+	{ .err = ENOMEM         , .str = "ENOMEM" },
+	{ .err = ENOSPC         , .str = "ENOSPC" },
+	{ .err = ENOSYS         , .str = "ENOSYS" },
+	{ .err = ENOTDIR        , .str = "ENOTDIR" },
+	{ .err = ENXIO          , .str = "ENXIO" },
+	{ .err = EPERM          , .str = "EPERM" },
+	{ .err = EPROTONOSUPPORT, .str = "EPROTONOSUPPORT" },
+	{ .err = EROFS          , .str = "EROFS" },
+	{ .err = ETXTBSY        , .str = "ETXTBSY" },
+	{ .err = EWOULDBLOCK    , .str = "EWOULDBLOCK" },
+};
+
+/* return an error message for errno <err> */
+static const char *errmsg(int err)
+{
+	int i;
+	for (i = 0; i < sizeof(errstr)/sizeof(errstr[0]); i++)
+		if (errstr[i].err == err)
+			return errstr[i].str;
+	return "Unknown error";
+}
+
+/* prints message <msg> + one LF to fd <fd> without buffering.
+ * <msg> cannot be NULL.
+ */
+static void fdperror(int fd, const char *msg)
+{
+	int err = errno;
+	write(fd, msg, strlen(msg));
+	write(fd, ": ", 2);
+	msg = errmsg(err);
+	write(fd, msg, strlen(msg));
+	write(fd, "\n", 1);
+}
+
 /* prints message <msg> + one LF to fd <fd> without buffering.
  * <msg> cannot be NULL.
  */
@@ -153,7 +207,7 @@ static inline void die(int ret, const char *msg)
 	if (ret < 0) {
 		ret = -ret;
 		if (msg)
-			perror(msg);
+			fdperror(2, msg);
 	}
 	else if (msg) {
 		fdputs((ret == 0) ? 1 : 2, msg);
