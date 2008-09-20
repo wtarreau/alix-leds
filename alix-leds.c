@@ -366,18 +366,10 @@ int if_exist(struct if_status *if1, struct if_status *if2, struct if_status *if3
 int update_cpu(struct led *led)
 {
 	char buffer[256];
-	FILE *f;
 	char *ptr;
 	unsigned int total, idle;
 
-	f = fopen("/proc/uptime", "r");
-	if (!f)
-		return 0;
-
-	ptr = fgets(buffer, sizeof(buffer), f);
-	fclose(f);
-
-	if (!ptr)
+	if (readfile("/proc/uptime", buffer, sizeof(buffer)) <= 0)
 		return 0;
 
 	/* format : 
@@ -385,6 +377,7 @@ int update_cpu(struct led *led)
 	 */
 
 	total = 0;
+	ptr = buffer;
 	while (*ptr && *ptr != ' ') {
 		if (isdigit(*ptr)) /* ignore dot */
 			total = total*10 + *ptr - '0';
