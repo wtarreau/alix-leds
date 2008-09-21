@@ -102,13 +102,16 @@ struct led {
 	unsigned int port; /* I/O port */
 	unsigned int mask; /* on/off mask */
 	char *disk_name;
-	struct if_status intf, slave, tun; /* checked interfaces */
+	struct if_status *intf, *slave, *tun; /* checked interfaces */
 	struct cpu_status cpu;
 	struct ide_status ide;
 	int count, limit, flash;           /* used for interface status */
 };
 
+#define MAXIFS 16
 static struct led leds[3];
+static struct if_status ifs[MAXIFS];
+static int nbifs = 0;
 
 /* network socket */
 static int net_sock  = 0; /* -2 = unneeded, -1 = needed, >=0 = initialized */
@@ -286,6 +289,30 @@ static inline const char *ultoa_r(unsigned long n, char *buffer, int size)
 		n /= 10;
 	} while (n && pos >= buffer);
 	return pos + 1;
+}
+
+/* return a pointer to a struct if_status already existing or just created
+ * matching this interface name and type. NULL is returned if the interface
+ * does not exist and cannot be created. The name pointer is just copied, so
+ * the caller must allocate it if required.
+ */
+struct if_status *getif(const char *name, int type)
+{
+	int if_num;
+
+	for (if_num = 0; if_num < nbifs; if_num++)
+		if (ifs[if_num].type == type &&
+		    strcmp(name, ifs[if_num].name) == 0)
+			return &ifs[if_num];
+
+	if (nbifs >= MAXIFS)
+		return NULL;
+
+	ifs[nbifs].name = name;
+	ifs[nbifs].type = type;
+	nbifs++;
+
+	return &ifs[nbifs-1];
 }
 
 /* return link status for interface <dev> using socket <sock>.
@@ -626,33 +653,48 @@ void manage_running(struct led *led)
 
 void manage_net(struct led *led)
 {
+	enum { ETH_UP = 1, SLAVE_UP = 2, TUN_UP = 4 };
+	unsigned char status = ETH_UP | SLAVE_UP | TUN_UP;
+
 	switch (led->state) {
 	case 0: led->state = 1;
 		/* fall through */
 	case 1:
-		if_exist(&led->intf, &led->slave, &led->tun);
-		led->intf.status = !led->intf.name ||
-			(led->intf.present &&
-			 (if_up(net_sock, led->intf.name) == 1) &&
-			 (glink(net_sock, led->intf.name) == 1));
-	
-		led->slave.status = !led->slave.name ||
-			(led->slave.present &&
-			 (if_up(net_sock, led->slave.name) == 1));
-	
-		led->tun.status = !led->tun.name ||
-			(led->tun.present &&
-			 (if_up(net_sock, led->tun.name) == 1));
+		if_exist(led->intf, led->slave, led->tun);
+		if (led->intf) {
+			led->intf->status = !led->intf->name ||
+				(led->intf->present &&
+				 (if_up(net_sock, led->intf->name) == 1) &&
+				 (glink(net_sock, led->intf->name) == 1));
+			if (!led->intf->status)
+				status &= ~ETH_UP;
+		}
 
-		if (led->intf.status && led->slave.status && led->tun.status) {
+		if (led->slave) {
+			led->slave->status = !led->slave->name ||
+				(led->slave->present &&
+				 (if_up(net_sock, led->slave->name) == 1));
+			if (!led->slave->status)
+				status &= ~SLAVE_UP;
+		}
+
+		if (led->tun) {
+			led->tun->status = !led->tun->name ||
+				(led->tun->present &&
+				 (if_up(net_sock, led->tun->name) == 1));
+			if (!led->tun->status)
+				status &= ~TUN_UP;
+		}
+
+		if (status == (ETH_UP | SLAVE_UP | TUN_UP)) {
 			led->limit = MAXSTEPS; // always on if eth & slave & tun UP
 			led->flash = 0;
 		}
-		else if (led->intf.status && led->slave.status) {
+		else if (status == (ETH_UP | SLAVE_UP)) {
 			led->limit = MAXSTEPS; // flashes if eth & slave UP
 			led->flash = 1;
 		}
-		else if (led->intf.status) {
+		else if (status & ETH_UP) {
 			led->limit = MAXSTEPS/2;  // 50% ON/OFF if only eth UP
 			led->flash = 0;
 		}
@@ -678,7 +720,7 @@ void manage_net(struct led *led)
 #ifdef DEBUG
 		printf("manage_net: led=%p, state=%d count=%d limit=%d flash=%d intf=%d slave=%d tun=%d\n",
 		       led, led->state, led->count, led->limit, led->flash,
-		       led->intf.status, led->slave.status, led->tun.status);
+		       led->intf->status, led->slave->status, led->tun->status);
 #endif
 		break;
 	case 2:
@@ -795,8 +837,9 @@ int main(int argc, char **argv)
 			if (led->type != LED_UNUSED && led->type != LED_NET)
 				die(1, "LED already assigned to non-net polling");
 			led->type = LED_NET;
-			led->intf.type = IF_TYPE_PHYSICAL;
-			led->intf.name = argv[1];
+			led->intf = getif(argv[1], IF_TYPE_PHYSICAL);
+			if (!led->intf)
+				die(1, "Too many interfaces");
 			last_interf = argv[1];
 			net_sock = -1;
 			argc--; argv++;
@@ -807,8 +850,9 @@ int main(int argc, char **argv)
 			if (led->type != LED_UNUSED && led->type != LED_NET)
 				die(1, "LED already assigned to non-net polling");
 			led->type = LED_NET;
-			led->slave.type = IF_TYPE_LOGICAL;
-			led->slave.name = argv[1];
+			led->slave = getif(argv[1], IF_TYPE_LOGICAL);
+			if (!led->slave)
+				die(1, "Too many interfaces");
 			net_sock = -1;
 			argc--; argv++;
 		}
@@ -818,8 +862,9 @@ int main(int argc, char **argv)
 			if (led->type != LED_UNUSED && led->type != LED_NET)
 				die(1, "LED already assigned to non-net polling");
 			led->type = LED_NET;
-			led->tun.type = IF_TYPE_LOGICAL;
-			led->tun.name = argv[1];
+			led->tun = getif(argv[1], IF_TYPE_LOGICAL);
+			if (!led->tun)
+				die(1, "Too many interfaces");
 			net_sock = -1;
 			argc--; argv++;
 		}
