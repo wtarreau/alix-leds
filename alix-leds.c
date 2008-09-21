@@ -72,8 +72,15 @@ enum {
 	LED_DISK = 4,
 };
 
+enum {
+	IF_TYPE_NONE = 0,
+	IF_TYPE_PHYSICAL,
+	IF_TYPE_LOGICAL,
+};
+
 struct if_status {
 	const char *name;
+	int type; /* IF_TYPE_* */
 	int present;
 	int status;
 };
@@ -788,6 +795,7 @@ int main(int argc, char **argv)
 			if (led->type != LED_UNUSED && led->type != LED_NET)
 				die(1, "LED already assigned to non-net polling");
 			led->type = LED_NET;
+			led->intf.type = IF_TYPE_PHYSICAL;
 			led->intf.name = argv[1];
 			last_interf = argv[1];
 			net_sock = -1;
@@ -799,6 +807,7 @@ int main(int argc, char **argv)
 			if (led->type != LED_UNUSED && led->type != LED_NET)
 				die(1, "LED already assigned to non-net polling");
 			led->type = LED_NET;
+			led->slave.type = IF_TYPE_LOGICAL;
 			led->slave.name = argv[1];
 			net_sock = -1;
 			argc--; argv++;
@@ -809,6 +818,7 @@ int main(int argc, char **argv)
 			if (led->type != LED_UNUSED && led->type != LED_NET)
 				die(1, "LED already assigned to non-net polling");
 			led->type = LED_NET;
+			led->tun.type = IF_TYPE_LOGICAL;
 			led->tun.name = argv[1];
 			net_sock = -1;
 			argc--; argv++;
