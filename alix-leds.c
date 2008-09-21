@@ -291,6 +291,24 @@ static inline const char *ultoa_r(unsigned long n, char *buffer, int size)
 	return pos + 1;
 }
 
+/* return next line of buffer <buffer> after <start>, which may hold last
+ * return value. On first call, <start> must be NULL so that the beginning of
+ * <buffer> is returned first. When end of buffer is reached (\0), NULL is
+ * returned. The caller must be careful about setting <start> after any \0 if
+ * it truncates strings.
+ */
+static char *nextline(char *buffer, char *start)
+{
+	if (start)
+		while (*start && *(start++) != '\n');
+	else
+		start = buffer;
+
+	if (!*start)
+		return NULL;
+	return start;
+}
+
 /* return a pointer to a struct if_status already existing or just created
  * matching this interface name and type. NULL is returned if the interface
  * does not exist and cannot be created. The name pointer is just copied, so
@@ -356,31 +374,32 @@ int if_up(int sock, const char *dev)
  */
 int if_exist()
 {
-	char buffer[256];
-	FILE *f;
+	char buffer[4096];  // should be enough for about 25 interfaces
 	int ret = 0;
 	int if_num;
+	char *line;
 
 	for (if_num = 0; if_num < nbifs; if_num++)
 		ifs[if_num].present = 0;
 
-	f = fopen("/proc/net/dev", "r");
-	if (!f)
+	if (readfile("/proc/net/dev", buffer, sizeof(buffer)) <= 0)
 		return 0;
 
-	while (fgets(buffer, sizeof(buffer), f) != NULL) {
-		char *name, *colon;
+	line = NULL;
+	while ((line = nextline(buffer, line)) != NULL) {
+		char *name;
 
-		name = buffer;
-		while (isspace(*name))
-			name++;
-		colon = name;
-		while (*colon && !isspace(*colon) && *colon != ':')
-			colon++;
-		/* if colon points to ':', we have a name before it */
-		if (*colon != ':')
+		while (isspace(*line))
+			line++;
+		name = line;
+
+		while (*line && !isspace(*line) && *line != ':')
+			line++;
+
+		/* if line points to ':', we have a name before it */
+		if (*line != ':')
 			continue;
-		*(colon++) = 0;
+		*(line++) = 0;
 
 		for (if_num = 0; if_num < nbifs; if_num++) {
 			if (strcmp(name, ifs[if_num].name) == 0) {
@@ -389,7 +408,6 @@ int if_exist()
 			}
 		}
 	}
-	fclose(f);
 	return ret;
 }
 
@@ -661,26 +679,26 @@ void manage_net(struct led *led)
 	case 1:
 		if_exist();
 		if (led->intf) {
-			led->intf->status = !led->intf->name ||
-				(led->intf->present &&
-				 (if_up(net_sock, led->intf->name) == 1) &&
-				 (glink(net_sock, led->intf->name) == 1));
+			led->intf->status =
+				led->intf->present &&
+				(if_up(net_sock, led->intf->name) == 1) &&
+				(glink(net_sock, led->intf->name) == 1);
 			if (!led->intf->status)
 				status &= ~ETH_UP;
 		}
 
 		if (led->slave) {
-			led->slave->status = !led->slave->name ||
-				(led->slave->present &&
-				 (if_up(net_sock, led->slave->name) == 1));
+			led->slave->status =
+				led->slave->present &&
+				(if_up(net_sock, led->slave->name) == 1);
 			if (!led->slave->status)
 				status &= ~SLAVE_UP;
 		}
 
 		if (led->tun) {
-			led->tun->status = !led->tun->name ||
-				(led->tun->present &&
-				 (if_up(net_sock, led->tun->name) == 1));
+			led->tun->status =
+				led->tun->present &&
+				(if_up(net_sock, led->tun->name) == 1);
 			if (!led->tun->status)
 				status &= ~TUN_UP;
 		}
@@ -719,7 +737,7 @@ void manage_net(struct led *led)
 #ifdef DEBUG
 		printf("manage_net: led=%p, state=%d count=%d limit=%d flash=%d intf=%d slave=%d tun=%d\n",
 		       led, led->state, led->count, led->limit, led->flash,
-		       led->intf->status, led->slave->status, led->tun->status);
+		       !!(status & ETH_UP), !!(status & SLAVE_UP), !!(status & TUN_UP));
 #endif
 		break;
 	case 2:
