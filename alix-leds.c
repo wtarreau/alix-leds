@@ -1,11 +1,11 @@
 /*
- * alix-leds version 2.0 - (C) 2008 - Willy Tarreau <w@1wt.eu>
+ * alix-leds version 3.0 - (C) 2008 - Willy Tarreau <w@1wt.eu>
  * Blink LEDs on ALIX motherboards depending on network status.
  * Redistribute under GPLv2.
  *
  * To build optimally (add -DQUIET to remove messages) :
- *  $ diet gcc -fomit-frame-pointer -Wall -Os -Wl,--sort-section=alignment \
- *         -o alix-leds alix-leds.c 
+ *  $ diet gcc -fomit-frame-pointer -mpreferred-stack-boundary=2 -Wall -Os \
+ *         -Wl,--gc-sections -o alix-leds alix-leds.c 
  *  $ sstrip alix-leds
  *
  * For more info about usage, check the "usage" help string below.
@@ -148,7 +148,7 @@ static char trash[2048];
 
 const char usage[] =
 #ifndef QUIET
-  "alix-leds version 2.0 - (C) 2008 - Willy Tarreau <w@1wt.eu>\n"
+  "alix-leds version 3.0 - (C) 2008 - Willy Tarreau <w@1wt.eu>\n"
   "  Blink LEDs on ALIX motherboards depending on system and network status.\n"
   "\n"
   "Usage:\n"
@@ -280,10 +280,15 @@ static int readfile(const char *name, char *buffer, int size)
  * if ret == 0, return msg on stdout and return 0.
  * if msg is NULL, nothing is reported.
  */
-__attribute__((noreturn))
-static void die(int ret, const char *msg)
-{
 #ifndef QUIET
+#define die(r, m) _die((r), (m))
+#else
+#define die(r, m) exit(r)
+#endif
+
+__attribute__((noreturn))
+static void _die(int ret, const char *msg)
+{
 	if (ret < 0) {
 		ret = -ret;
 		if (msg)
@@ -292,7 +297,6 @@ static void die(int ret, const char *msg)
 	else if (msg) {
 		fdputs((ret == 0) ? 1 : 2, msg);
 	}
-#endif
 	exit(ret);
 }
 

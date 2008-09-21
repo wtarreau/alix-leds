@@ -1,0 +1,9 @@
+# Pick one line below to add to /etc/startup.rc
+# check all physical interfaces status
+# /sbin/alix-leds -l 1 -u -l 2 -d -l 3 -i eth0 -i eth1 -i eth2
+
+# idem + also check ppp0
+# /sbin/alix-leds -l 1 -u -l 2 -d -l 3 -i eth0 -i eth1 -i eth2 -s ppp0
+
+# idem + also check tun0
+# /sbin/alix-leds -l 1 -u -l 2 -d -l 3 -i eth0 -i eth1 -i eth2 -s ppp0 -t tun0
