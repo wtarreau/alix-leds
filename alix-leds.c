@@ -77,11 +77,18 @@ enum {
  * reported up.
  */
 enum {
-	IF_CHECK_NONE = 0,
+	IF_CHECK_NONE     = 0,
 	IF_CHECK_PRESENT  = 1,  /* only check for presence */
 	IF_CHECK_LOGICAL  = 2,  /* only check admin status */
 	IF_CHECK_PHYSICAL = 4,  /* check physical status   */
 	IF_CHECK_BOTH     = 6,  /* check both logical and physical */
+};
+
+/* status values reported by check_if_list() */
+enum {
+	ETH_UP   = 1,
+	SLAVE_UP = 2,
+	TUN_UP   = 4,
 };
 
 struct if_status {
@@ -100,6 +107,11 @@ struct ide_status {
 	unsigned int disk_usage;
 };
 
+struct if_list {
+	struct if_status *ifs;
+	struct if_list *next;
+};
+
 struct led {
 	int type;  /* led type (LED_*). 0 = unused */
 	int state; /* internal state. 0 at init. 1 for first state. */
@@ -107,16 +119,20 @@ struct led {
 	unsigned int port; /* I/O port */
 	unsigned int mask; /* on/off mask */
 	char *disk_name;
-	struct if_status *intf, *slave, *tun; /* checked interfaces */
+	struct if_list *intf, *slave, *tun; /* checked interfaces */
 	struct cpu_status cpu;
 	struct ide_status ide;
 	int count, limit, flash;           /* used for interface status */
 };
 
-#define MAXIFS 16
+#define MAXIFS 8
+#define MAXIFL (MAXIFS*3)   // about MAXIFS times NBLEDs
+
 static struct led leds[3];
 static struct if_status ifs[MAXIFS];
 static int nbifs;
+static struct if_list ifl[MAXIFL];
+static int nbifl;
 
 /* network socket */
 static int net_sock;  /* -2 = unneeded, -1 = needed, >=0 = initialized */
@@ -139,13 +155,13 @@ const char usage[] =
   "\n"
   "LEDs 1,2,3 are independently managed. Specify one led, followed by the checks\n"
   "to associate to that LED. Repeat for other leds. Network interface status can\n"
-  "report up to 3 interfaces per LED : a physical interface with link checking, a\n"
-  "slave interface (eg: ppp), and a tunnel interface, in this priority order. Any\n"
+  "report 3 interfaces types per LED : physical interfaces with link checking,\n"
+  "slave interfaces (eg: ppp), and tunnel interfaces, in this priority order. Any\n"
   "unspecified interface is considered up. Network status is reported as follows :\n"
-  "  - when all interfaces are up, the LED remains lit.\n"
-  "  - when <intf> link is down, the LED remains off.\n"
-  "  - when <slave> is down or absent, the LED blinks slowly (once per second).\n"
-  "  - when <tun> is down or absent, the LED flashes twice a second.\n"
+  "  - when at least one interface of each type is up, the LED remains lit.\n"
+  "  - when all <intf> link are down, the LED remains off.\n"
+  "  - when all <slave> are down or absent, the LED blinks slowly (once a second).\n"
+  "  - when all <tun> are down or absent, the LED flashes twice a second.\n"
   "The 'running' more (-r) will slowly blink the led at 1 Hz. Using -R will blink\n"
   "it at 10 Hz. SIGUSR1 switches running leds to -r, SIGUSR2 switches them to -R.\n"
   "Use -p to store the daemon's pid into file <pidfile>. The 'usage' mode (-u)\n"
@@ -326,7 +342,7 @@ static char *nextline(char *buffer, char *start)
  * is just copied, so the caller must allocate it if required. If
  * the interface already exists, its checks may be completed.
  */
-struct if_status *getif(const char *name, int check)
+static inline struct if_status *getif(const char *name, int check)
 {
 	struct if_status *i;
 
@@ -345,6 +361,46 @@ struct if_status *getif(const char *name, int check)
 	nbifs++;
 
 	return i;
+}
+
+/* return a new struct if_list pointing to device <name> which may be
+ * allocated on the fly. The if_list element is inserted before <prev>.
+ * In case of lack of resource, NULL is returned.
+ */
+struct if_list *newif(const char *name, int check, struct if_list *prev)
+{
+	struct if_status *i;
+	struct if_list *l;
+
+	i = getif(name, check);
+	if (!i || nbifl >= MAXIFL)
+		return NULL;
+
+	l = &ifl[nbifl];
+	nbifl++;
+	l->next = prev;
+	l->ifs = i;
+	return l;
+}
+
+/* Check if at least one interface is up in the list <l>, which can be NULL,
+ * according to checks defined by <check>. If this is the case, <flag> is
+ * returned.
+ */
+unsigned int check_if_list(struct if_list *l, unsigned int check, unsigned int flag)
+{
+	unsigned int ret = 0;
+
+	if (!l)
+		return flag;
+
+	do {
+		if ((l->ifs->status & check) == check)
+			ret = flag;
+		l = l->next;
+	} while (l);
+
+	return ret;
 }
 
 /* return link status for interface <dev> using socket <sock>.
@@ -699,24 +755,15 @@ void manage_running(struct led *led)
 
 void manage_net(struct led *led)
 {
-	enum { ETH_UP = 1, SLAVE_UP = 2, TUN_UP = 4 };
-	unsigned char status = ETH_UP | SLAVE_UP | TUN_UP;
-
 	switch (led->state) {
 	case 0: led->state = 1;
 		/* fall through */
-	case 1:
-		if (led->intf &&
-		    (led->intf->status & IF_CHECK_BOTH) != IF_CHECK_BOTH)
-			status &= ~ETH_UP;
+	case 1: {
+		unsigned int status = 0;
 
-		if (led->slave &&
-		    (led->slave->status & IF_CHECK_LOGICAL) == 0)
-			status &= ~SLAVE_UP;
-
-		if (led->tun &&
-		    (led->tun->status & IF_CHECK_LOGICAL) == 0)
-			status &= ~TUN_UP;
+		status |= check_if_list(led->intf,  IF_CHECK_BOTH,    ETH_UP);
+		status |= check_if_list(led->slave, IF_CHECK_LOGICAL, SLAVE_UP);
+		status |= check_if_list(led->tun,   IF_CHECK_LOGICAL, TUN_UP);
 
 		if (status == (ETH_UP | SLAVE_UP | TUN_UP)) {
 			led->limit = MAXSTEPS; // always on if eth & slave & tun UP
@@ -755,6 +802,7 @@ void manage_net(struct led *led)
 		       !!(status & ETH_UP), !!(status & SLAVE_UP), !!(status & TUN_UP));
 #endif
 		break;
+	}
 	case 2:
 		setled(led->mask, ~LED_ON, led->port);
 		led->sleep = SLEEP_500M * 15/100;
@@ -869,7 +917,7 @@ int main(int argc, char **argv)
 			if (led->type != LED_UNUSED && led->type != LED_NET)
 				die(1, "LED already assigned to non-net polling");
 			led->type = LED_NET;
-			led->intf = getif(argv[1], IF_CHECK_BOTH);
+			led->intf = newif(argv[1], IF_CHECK_BOTH, led->intf);
 			if (!led->intf)
 				die(1, "Too many interfaces");
 			last_interf = argv[1];
@@ -882,7 +930,7 @@ int main(int argc, char **argv)
 			if (led->type != LED_UNUSED && led->type != LED_NET)
 				die(1, "LED already assigned to non-net polling");
 			led->type = LED_NET;
-			led->slave = getif(argv[1], IF_CHECK_LOGICAL);
+			led->slave = newif(argv[1], IF_CHECK_LOGICAL, led->slave);
 			if (!led->slave)
 				die(1, "Too many interfaces");
 			net_sock = -1;
@@ -894,7 +942,7 @@ int main(int argc, char **argv)
 			if (led->type != LED_UNUSED && led->type != LED_NET)
 				die(1, "LED already assigned to non-net polling");
 			led->type = LED_NET;
-			led->tun = getif(argv[1], IF_CHECK_LOGICAL);
+			led->tun = newif(argv[1], IF_CHECK_LOGICAL, led->tun);
 			if (!led->tun)
 				die(1, "Too many interfaces");
 			net_sock = -1;
