@@ -111,11 +111,17 @@ struct led {
 #define MAXIFS 16
 static struct led leds[3];
 static struct if_status ifs[MAXIFS];
-static int nbifs = 0;
+static int nbifs;
 
 /* network socket */
-static int net_sock  = 0; /* -2 = unneeded, -1 = needed, >=0 = initialized */
-static int fast_mode = 0; /* start blink fast for running led */
+static int net_sock;  /* -2 = unneeded, -1 = needed, >=0 = initialized */
+static int fast_mode; /* start blink fast for running led */
+
+/* This trash buffer may be used at will. It's mostly a buffer to store file
+ * contents when parsing them. It should be enough to read stats for about 12
+ * interfaces, and to read about 40 interrupts on an SMP machine.
+ */
+static char trash[2048];
 
 const char usage[] =
 #ifndef QUIET
@@ -374,7 +380,6 @@ int if_up(int sock, const char *dev)
  */
 int if_exist()
 {
-	char buffer[4096];  // should be enough for about 25 interfaces
 	int ret = 0;
 	int if_num;
 	char *line;
@@ -382,11 +387,11 @@ int if_exist()
 	for (if_num = 0; if_num < nbifs; if_num++)
 		ifs[if_num].present = 0;
 
-	if (readfile("/proc/net/dev", buffer, sizeof(buffer)) <= 0)
+	if (readfile("/proc/net/dev", trash, sizeof(trash)) <= 0)
 		return 0;
 
 	line = NULL;
-	while ((line = nextline(buffer, line)) != NULL) {
+	while ((line = nextline(trash, line)) != NULL) {
 		char *name;
 
 		while (isspace(*line))
@@ -416,11 +421,10 @@ int if_exist()
  */
 int update_cpu(struct led *led)
 {
-	char buffer[256];
 	char *ptr;
 	unsigned int total, idle;
 
-	if (readfile("/proc/uptime", buffer, sizeof(buffer)) <= 0)
+	if (readfile("/proc/uptime", trash, sizeof(trash)) <= 0)
 		return 0;
 
 	/* format : 
@@ -428,7 +432,7 @@ int update_cpu(struct led *led)
 	 */
 
 	total = 0;
-	ptr = buffer;
+	ptr = trash;
 	while (*ptr && *ptr != ' ') {
 		if (isdigit(*ptr)) /* ignore dot */
 			total = total*10 + *ptr - '0';
@@ -471,17 +475,16 @@ int update_cpu(struct led *led)
  */
 int update_disk(struct led *led)
 {
-	char buffer[4096];
 	char *ptr;
 	unsigned int total, count;
 
 
-	if (readfile("/proc/interrupts", buffer, sizeof(buffer)) <= 0)
+	if (readfile("/proc/interrupts", trash, sizeof(trash)) <= 0)
 		return 0;
 
 	total = 0;
 	ptr = NULL;
-	while ((ptr = nextline(buffer, ptr)) != NULL) {
+	while ((ptr = nextline(trash, ptr)) != NULL) {
 		/* format : 
 		 * [ 0-9]*:    count   pic   device[, device]
 		 */
