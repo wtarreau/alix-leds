@@ -89,6 +89,7 @@ enum {
 	ETH_UP   = 1,
 	SLAVE_UP = 2,
 	TUN_UP   = 4,
+	LINK_CHANGED  = 8, /* link change detected */
 };
 
 struct if_status {
@@ -110,6 +111,7 @@ struct ide_status {
 struct if_list {
 	struct if_status *ifs;
 	struct if_list *next;
+	int prev_status;
 };
 
 struct led {
@@ -122,7 +124,7 @@ struct led {
 	struct if_list *intf, *slave, *tun; /* checked interfaces */
 	struct cpu_status cpu;
 	struct ide_status ide;
-	int count, limit, flash;           /* used for interface status */
+	int count, limit, flash;   /* used for interface status */
 };
 
 #define MAXIFS 8
@@ -162,6 +164,7 @@ const char usage[] =
   "  - when all <intf> link are down, the LED remains off.\n"
   "  - when all <slave> are down or absent, the LED blinks slowly (once a second).\n"
   "  - when all <tun> are down or absent, the LED flashes twice a second.\n"
+  "  - after a status change, the LED flashes once.\n"
   "The 'running' more (-r) will slowly blink the led at 1 Hz. Using -R will blink\n"
   "it at 10 Hz. SIGUSR1 switches running leds to -r, SIGUSR2 switches them to -R.\n"
   "Use -p to store the daemon's pid into file <pidfile>. The 'usage' mode (-u)\n"
@@ -396,7 +399,11 @@ unsigned int check_if_list(struct if_list *l, unsigned int check, unsigned int f
 
 	do {
 		if ((l->ifs->status & check) == check)
-			ret = flag;
+			ret |= flag;
+		if (l->prev_status != l->ifs->status) {
+			l->prev_status = l->ifs->status;
+			ret |= LINK_CHANGED;
+		}
 		l = l->next;
 	} while (l);
 
@@ -758,34 +765,51 @@ void manage_net(struct led *led)
 	switch (led->state) {
 	case 0: led->state = 1;
 		/* fall through */
-	case 1: {
-		unsigned int status = 0;
+	case 1:
+		if (led->count == 0) {
+			/* changes are only checked at first step */
+			unsigned int status = 0;
 
-		status |= check_if_list(led->intf,  IF_CHECK_BOTH,    ETH_UP);
-		status |= check_if_list(led->slave, IF_CHECK_LOGICAL, SLAVE_UP);
-		status |= check_if_list(led->tun,   IF_CHECK_LOGICAL, TUN_UP);
+			status |= check_if_list(led->intf,  IF_CHECK_BOTH,    ETH_UP);
+			status |= check_if_list(led->slave, IF_CHECK_LOGICAL, SLAVE_UP);
+			status |= check_if_list(led->tun,   IF_CHECK_LOGICAL, TUN_UP);
 
-		if (status == (ETH_UP | SLAVE_UP | TUN_UP)) {
-			led->limit = MAXSTEPS; // always on if eth & slave & tun UP
 			led->flash = 0;
-		}
-		else if (status == (ETH_UP | SLAVE_UP)) {
-			led->limit = MAXSTEPS; // flashes if eth & slave UP
-			led->flash = 1;
-		}
-		else if (status & ETH_UP) {
-			led->limit = MAXSTEPS/2;  // 50% ON/OFF if only eth UP
-			led->flash = 0;
-		}
-		else {
-			led->limit = 0;  // always off if eth DOWN
-			led->flash = 0;
+			if ((status & (ETH_UP|SLAVE_UP|TUN_UP)) == (ETH_UP|SLAVE_UP|TUN_UP)) {
+				led->limit = MAXSTEPS; // always on if eth & slave & tun UP
+			}
+			else if ((status & (ETH_UP|SLAVE_UP|TUN_UP)) == (ETH_UP|SLAVE_UP)) {
+				led->limit = MAXSTEPS; // 2 flashes if eth & slave UP
+				led->flash = 2;
+			}
+			else if (status & ETH_UP) {
+				led->limit = MAXSTEPS/2;  // 50% ON/OFF if only eth UP
+			}
+			else {
+				led->limit = 0;  // always off if eth DOWN
+			}
+
+			/* blink once if the status has changed */
+			if (status & LINK_CHANGED)
+				led->flash = 1;
+#ifdef DEBUG
+			printf("manage_net: led=%p, state=%d count=%d limit=%d flash=%d intf=%d slave=%d tun=%d\n",
+			       led, led->state, led->count, led->limit, led->flash,
+			       !!(status & ETH_UP), !!(status & SLAVE_UP), !!(status & TUN_UP));
+#endif
 		}
 
-		if (led->count == MAXSTEPS-1 && led->flash) {
+		if (led->count == 0 && led->flash) {
 			setled(led->mask, LED_ON, led->port);
-			led->sleep = SLEEP_500M * 45/100;
-			led->state = 2;
+			if (led->flash == 2) {
+				/* two flashes */
+				led->sleep = SLEEP_500M * 45/100;
+				led->state = 2;
+			} else {
+				/* one flash */
+				led->sleep = SLEEP_500M * 85/100;
+				led->state = 4;
+			}
 		}
 		else if (led->count < led->limit) {
 			setled(led->mask, LED_ON, led->port);
@@ -795,14 +819,7 @@ void manage_net(struct led *led)
 			setled(led->mask, ~LED_ON, led->port);
 			led->sleep = SLEEP_500M;
 		}
-
-#ifdef DEBUG
-		printf("manage_net: led=%p, state=%d count=%d limit=%d flash=%d intf=%d slave=%d tun=%d\n",
-		       led, led->state, led->count, led->limit, led->flash,
-		       !!(status & ETH_UP), !!(status & SLAVE_UP), !!(status & TUN_UP));
-#endif
 		break;
-	}
 	case 2:
 		setled(led->mask, ~LED_ON, led->port);
 		led->sleep = SLEEP_500M * 15/100;
