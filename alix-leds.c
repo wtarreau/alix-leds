@@ -280,6 +280,7 @@ static int readfile(const char *name, char *buffer, int size)
  * if ret == 0, return msg on stdout and return 0.
  * if msg is NULL, nothing is reported.
  */
+__attribute__((noreturn))
 static void die(int ret, const char *msg)
 {
 #ifndef QUIET
@@ -918,7 +919,7 @@ int main(int argc, char **argv)
 
 		/* options with two args below */
 		else if (argc < 2)
-				die(1, usage);
+			die(1, usage);
 
 		else if (argv[0][1] == 'i') {
 			if (!led)
@@ -973,6 +974,10 @@ int main(int argc, char **argv)
 			die(1, usage);
 		argc--; argv++;
 	}
+
+	/* we want at least one led! */
+	if (!led)
+		die(1, usage);
 
 	if (iopl(3) == -1)
 #ifndef DEBUG
