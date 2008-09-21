@@ -706,7 +706,6 @@ void manage_net(struct led *led)
 	case 0: led->state = 1;
 		/* fall through */
 	case 1:
-		check_if_status();
 		if (led->intf &&
 		    (led->intf->status & IF_CHECK_BOTH) != IF_CHECK_BOTH)
 			status &= ~ETH_UP;
@@ -990,8 +989,16 @@ int main(int argc, char **argv)
 	 * scalable and should never process hundreds of tasks.
 	 */
 	while (1) {
+		static int net_sleep;
 		int led_num;
 		int sleep_time = MAXSLEEP;
+
+		/* use this if we need to check network status */
+		if (nbifs && net_sleep <= 0) {
+			check_if_status();
+			net_sleep = SLEEP_500M;
+			sleep_time = net_sleep;
+		}
 
 		for (led_num = 0; led_num < 3; led_num++) {
 			led = &leds[led_num];
@@ -1025,17 +1032,18 @@ int main(int argc, char **argv)
 				sleep_time = led->sleep;
 		}
 
-		if (sleep_time > 1000000)
-			sleep_time = 1000000;
-
 		/* Sleep and ignore signals. We will drift but its not dramatic */
 		while (usleep(sleep_time) != 0 && errno == EINTR);
+
+		/* update the network checker's sleep time */
+		if (nbifs)
+			net_sleep -= sleep_time;
 
 		/* update all leds' sleep time */
 		for (led_num = 0; led_num < 3; led_num++) {
 			led = &leds[led_num];
 			if (led->type != LED_UNUSED)
 				led->sleep -= sleep_time;
-		}		
+		}
 	}
 }
