@@ -413,6 +413,16 @@ int if_exist()
 			}
 		}
 	}
+
+	/* update all interfaces status */
+	for (if_num = 0; if_num < nbifs; if_num++) {
+		ifs[if_num].status =
+			ifs[if_num].present &&
+			(if_up(net_sock, ifs[if_num].name) == 1) &&
+			(ifs[if_num].type != IF_TYPE_PHYSICAL ||
+			 (glink(net_sock, ifs[if_num].name) == 1));
+	}
+	
 	return ret;
 }
 
@@ -688,30 +698,14 @@ void manage_net(struct led *led)
 		/* fall through */
 	case 1:
 		if_exist();
-		if (led->intf) {
-			led->intf->status =
-				led->intf->present &&
-				(if_up(net_sock, led->intf->name) == 1) &&
-				(glink(net_sock, led->intf->name) == 1);
-			if (!led->intf->status)
-				status &= ~ETH_UP;
-		}
+		if (led->intf && !led->intf->status)
+			status &= ~ETH_UP;
 
-		if (led->slave) {
-			led->slave->status =
-				led->slave->present &&
-				(if_up(net_sock, led->slave->name) == 1);
-			if (!led->slave->status)
-				status &= ~SLAVE_UP;
-		}
+		if (led->slave && !led->slave->status)
+			status &= ~SLAVE_UP;
 
-		if (led->tun) {
-			led->tun->status =
-				led->tun->present &&
-				(if_up(net_sock, led->tun->name) == 1);
-			if (!led->tun->status)
-				status &= ~TUN_UP;
-		}
+		if (led->tun && !led->tun->status)
+			status &= ~TUN_UP;
 
 		if (status == (ETH_UP | SLAVE_UP | TUN_UP)) {
 			led->limit = MAXSTEPS; // always on if eth & slave & tun UP
