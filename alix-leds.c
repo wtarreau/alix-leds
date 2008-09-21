@@ -72,17 +72,22 @@ enum {
 	LED_DISK = 4,
 };
 
+/* The check indicates if we are allowed to run ethtool checks on the interface
+ * and what will be reported. When a check is not enabled, its result is
+ * reported up.
+ */
 enum {
-	IF_TYPE_NONE = 0,
-	IF_TYPE_PHYSICAL,
-	IF_TYPE_LOGICAL,
+	IF_CHECK_NONE = 0,
+	IF_CHECK_PRESENT  = 1,  /* only check for presence */
+	IF_CHECK_LOGICAL  = 2,  /* only check admin status */
+	IF_CHECK_PHYSICAL = 4,  /* check physical status   */
+	IF_CHECK_BOTH     = 6,  /* check both logical and physical */
 };
 
 struct if_status {
 	const char *name;
-	int type; /* IF_TYPE_* */
-	int present;
-	int status;
+	int check;  /* bit field of IF_CHECK_* */
+	int status; /* bit field of IF_CHECK_* */
 };
 
 struct cpu_status {
@@ -315,28 +320,31 @@ static char *nextline(char *buffer, char *start)
 	return start;
 }
 
-/* return a pointer to a struct if_status already existing or just created
- * matching this interface name and type. NULL is returned if the interface
- * does not exist and cannot be created. The name pointer is just copied, so
- * the caller must allocate it if required.
+/* return a pointer to a struct if_status already existing or just
+ * created matching this interface name. NULL is returned if the
+ * interface does not exist and cannot be created. The name pointer
+ * is just copied, so the caller must allocate it if required. If
+ * the interface already exists, its checks may be completed.
  */
-struct if_status *getif(const char *name, int type)
+struct if_status *getif(const char *name, int check)
 {
-	int if_num;
+	struct if_status *i;
 
-	for (if_num = 0; if_num < nbifs; if_num++)
-		if (ifs[if_num].type == type &&
-		    strcmp(name, ifs[if_num].name) == 0)
-			return &ifs[if_num];
+	for (i = ifs; i < ifs + nbifs; i++) {
+		if (strcmp(name, i->name) == 0) {
+			i->check |= check;
+			return i;
+		}
+	}
 
 	if (nbifs >= MAXIFS)
 		return NULL;
 
-	ifs[nbifs].name = name;
-	ifs[nbifs].type = type;
+	i->name = name;
+	i->check = check;
 	nbifs++;
 
-	return &ifs[nbifs-1];
+	return i;
 }
 
 /* return link status for interface <dev> using socket <sock>.
@@ -371,24 +379,23 @@ int if_up(int sock, const char *dev)
 	return (ifr.ifr_flags & IFF_UP) ? 1 : 0;
 }
 
-/* Returns the number of existing devices found in /proc/net/dev. Their
- * corresponding entry gets ->present set to 1 if the device exists, or zero
- * if it was not found. Note that it is permitted to have several interfaces
- * with the same name. It is important to check for device existence before
- * querying it, because it avoids the automatic modprobe the system may do
- * for absent devices.
+/* Check in /proc/net/dev for the presence of all devices declared in ifs[],
+ * as well as their status, depending on ->check. The ->status field is
+ * updated to reflect the checks which succeeded. Note that it is not permitted
+ * anymore to have several interfaces with the same name. It is important to
+ * check for device existence before querying it, because it avoids the
+ * automatic modprobe the system may do for absent devices.
  */
-int if_exist()
+void check_if_status()
 {
-	int ret = 0;
 	int if_num;
 	char *line;
 
 	for (if_num = 0; if_num < nbifs; if_num++)
-		ifs[if_num].present = 0;
+		ifs[if_num].status = IF_CHECK_NONE;
 
 	if (readfile("/proc/net/dev", trash, sizeof(trash)) <= 0)
-		return 0;
+		return;
 
 	line = NULL;
 	while ((line = nextline(trash, line)) != NULL) {
@@ -408,22 +415,24 @@ int if_exist()
 
 		for (if_num = 0; if_num < nbifs; if_num++) {
 			if (strcmp(name, ifs[if_num].name) == 0) {
-				ifs[if_num].present = 1;
-				ret++;
+				ifs[if_num].status = IF_CHECK_PRESENT;
+				break;
 			}
 		}
 	}
 
-	/* update all interfaces status */
+	/* update all interfaces status according to the declared checks */
 	for (if_num = 0; if_num < nbifs; if_num++) {
-		ifs[if_num].status =
-			ifs[if_num].present &&
-			(if_up(net_sock, ifs[if_num].name) == 1) &&
-			(ifs[if_num].type != IF_TYPE_PHYSICAL ||
-			 (glink(net_sock, ifs[if_num].name) == 1));
-	}
+		if (ifs[if_num].status & IF_CHECK_PRESENT) {
+			if (!(ifs[if_num].check & IF_CHECK_LOGICAL) ||
+			    if_up(net_sock, ifs[if_num].name))
+				ifs[if_num].status |= IF_CHECK_LOGICAL;
 	
-	return ret;
+			if (!(ifs[if_num].check & IF_CHECK_PHYSICAL) ||
+			    (glink(net_sock, ifs[if_num].name) == 1))
+				ifs[if_num].status |= IF_CHECK_PHYSICAL;
+		}
+	}
 }
 
 /* retrieve CPU usage from /proc/uptime, and update cpu_total[] and cpu_idle[].
@@ -697,14 +706,17 @@ void manage_net(struct led *led)
 	case 0: led->state = 1;
 		/* fall through */
 	case 1:
-		if_exist();
-		if (led->intf && !led->intf->status)
+		check_if_status();
+		if (led->intf &&
+		    (led->intf->status & IF_CHECK_BOTH) != IF_CHECK_BOTH)
 			status &= ~ETH_UP;
 
-		if (led->slave && !led->slave->status)
+		if (led->slave &&
+		    (led->slave->status & IF_CHECK_LOGICAL) == 0)
 			status &= ~SLAVE_UP;
 
-		if (led->tun && !led->tun->status)
+		if (led->tun &&
+		    (led->tun->status & IF_CHECK_LOGICAL) == 0)
 			status &= ~TUN_UP;
 
 		if (status == (ETH_UP | SLAVE_UP | TUN_UP)) {
@@ -858,7 +870,7 @@ int main(int argc, char **argv)
 			if (led->type != LED_UNUSED && led->type != LED_NET)
 				die(1, "LED already assigned to non-net polling");
 			led->type = LED_NET;
-			led->intf = getif(argv[1], IF_TYPE_PHYSICAL);
+			led->intf = getif(argv[1], IF_CHECK_BOTH);
 			if (!led->intf)
 				die(1, "Too many interfaces");
 			last_interf = argv[1];
@@ -871,7 +883,7 @@ int main(int argc, char **argv)
 			if (led->type != LED_UNUSED && led->type != LED_NET)
 				die(1, "LED already assigned to non-net polling");
 			led->type = LED_NET;
-			led->slave = getif(argv[1], IF_TYPE_LOGICAL);
+			led->slave = getif(argv[1], IF_CHECK_LOGICAL);
 			if (!led->slave)
 				die(1, "Too many interfaces");
 			net_sock = -1;
@@ -883,7 +895,7 @@ int main(int argc, char **argv)
 			if (led->type != LED_UNUSED && led->type != LED_NET)
 				die(1, "LED already assigned to non-net polling");
 			led->type = LED_NET;
-			led->tun = getif(argv[1], IF_TYPE_LOGICAL);
+			led->tun = getif(argv[1], IF_CHECK_LOGICAL);
 			if (!led->tun)
 				die(1, "Too many interfaces");
 			net_sock = -1;
