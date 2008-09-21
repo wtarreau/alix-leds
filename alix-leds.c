@@ -354,23 +354,22 @@ int if_up(int sock, const char *dev)
  * querying it, because it avoids the automatic modprobe the system may do
  * for absent devices.
  */
-int if_exist(struct if_status *if1, struct if_status *if2, struct if_status *if3)
+int if_exist()
 {
 	char buffer[256];
-	struct if_status *ifs[3] = {if1, if2, if3};
 	FILE *f;
 	int ret = 0;
+	int if_num;
 
-	if1->present = 0;
-	if2->present = 0;
-	if3->present = 0;
+	for (if_num = 0; if_num < nbifs; if_num++)
+		ifs[if_num].present = 0;
+
 	f = fopen("/proc/net/dev", "r");
 	if (!f)
 		return 0;
 
 	while (fgets(buffer, sizeof(buffer), f) != NULL) {
 		char *name, *colon;
-		int ifnum;
 
 		name = buffer;
 		while (isspace(*name))
@@ -383,9 +382,9 @@ int if_exist(struct if_status *if1, struct if_status *if2, struct if_status *if3
 			continue;
 		*(colon++) = 0;
 
-		for (ifnum = 0; ifnum < 3; ifnum++) {
-			if (ifs[ifnum]->name && strcmp(name, ifs[ifnum]->name) == 0) {
-				ifs[ifnum]->present = 1;
+		for (if_num = 0; if_num < nbifs; if_num++) {
+			if (strcmp(name, ifs[if_num].name) == 0) {
+				ifs[if_num].present = 1;
 				ret++;
 			}
 		}
@@ -660,7 +659,7 @@ void manage_net(struct led *led)
 	case 0: led->state = 1;
 		/* fall through */
 	case 1:
-		if_exist(led->intf, led->slave, led->tun);
+		if_exist();
 		if (led->intf) {
 			led->intf->status = !led->intf->name ||
 				(led->intf->present &&
