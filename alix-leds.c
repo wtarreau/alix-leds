@@ -258,7 +258,7 @@ static int readfile(const char *name, char *buffer, int size)
  * if ret == 0, return msg on stdout and return 0.
  * if msg is NULL, nothing is reported.
  */
-static inline void die(int ret, const char *msg)
+static void die(int ret, const char *msg)
 {
 #ifndef QUIET
 	if (ret < 0) {
@@ -471,24 +471,24 @@ int update_cpu(struct led *led)
  */
 int update_disk(struct led *led)
 {
-	char buffer[256];
-	FILE *f;
+	char buffer[4096];
 	char *ptr;
 	unsigned int total, count;
 
-	f = fopen("/proc/interrupts", "r");
-	if (!f)
+
+	if (readfile("/proc/interrupts", buffer, sizeof(buffer)) <= 0)
 		return 0;
 
 	total = 0;
-	while (fgets(buffer, sizeof(buffer), f) != NULL) {
+	ptr = NULL;
+	while ((ptr = nextline(buffer, ptr)) != NULL) {
 		/* format : 
 		 * [ 0-9]*:    count   pic   device[, device]
 		 */
 
-		ptr = buffer;
 		while (*ptr != ':') {
-			if (!*ptr || (*ptr != ' ' && !isdigit(*ptr)))
+			if (!*ptr || *ptr == '\n' ||
+			    (*ptr != ' ' && !isdigit(*ptr)))
 				goto next_line;
 			ptr++;
 		}
@@ -496,26 +496,32 @@ int update_disk(struct led *led)
 		/* skip the colon and the spaces */
 		while (isspace(*++ptr));
 
-		/* read counter */
+		/* read counter(s).
+		 * Note: we may have several columns with digits on SMP systems. */
 		count = 0;
 		while (isdigit(*ptr)) {
-			count = count*10 + *ptr - '0';
-			ptr++;
-		}
-		if (!*ptr)
-			goto next_line;
+			int cpucount = 0;
 
-		/* skip the spaces */
-		while (isspace(*++ptr));
-		if (!*ptr)
-			goto next_line;
+			do {
+				cpucount = cpucount*10 + *ptr - '0';
+			} while (isdigit(*++ptr));
+
+			if (!*ptr || *ptr == '\n')
+				goto next_line;
+
+			count += cpucount;
+			/* skip the spaces */
+			while (isblank(*++ptr));
+			if (!*ptr || *ptr == '\n')
+				goto next_line;
+		}
 
 		/* skip the PIT names */
 		while (*ptr && !isspace(*++ptr));
 
 		/* skip the spaces again */
-		while (isspace(*++ptr));
-		if (!*ptr)
+		while (isblank(*++ptr));
+		if (!*ptr || *ptr == '\n')
 			goto next_line;
 
 		/* OK, we have the device(s) name here. Iterate over all names */
@@ -523,22 +529,24 @@ int update_disk(struct led *led)
 			const char *dev;
 
 			dev = ptr;
-			while (*ptr && *ptr != ',')
+			while (*ptr && *ptr != '\n' && *ptr != ',')
 				ptr++;
 
-			if (*ptr)
+			/* note: we don't overwrite the final LF, because it
+			 * will either not match or be ignored.
+			 */
+			if (*ptr && *ptr != '\n')
 				*(ptr++) = 0;
-
 			if (strncmp(dev, "ide", 3) == 0 || strncmp(dev, "pata", 4) == 0)
 				/* got it ! */
 				break;
 
-			if (!*ptr)
+			if (!*ptr || *ptr == '\n')
 				goto next_line;
 
 			/* skip the comma and spaces again */
-			while (isspace(*++ptr));
-			if (!*ptr)
+			while (isblank(*++ptr));
+			if (!*ptr || *ptr == '\n')
 				goto next_line;
 		}
 
@@ -547,7 +555,6 @@ int update_disk(struct led *led)
 	next_line:
 		;
 	}
-	fclose(f);
 
 	led->ide.count[0] = led->ide.count[1];
 	led->ide.count[1] = total;
