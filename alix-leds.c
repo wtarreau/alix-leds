@@ -175,33 +175,25 @@ const char usage[] =
 
 /* common error messages */
 static const struct {
-	int err;
-	const char *str;
+	unsigned char err;
+	const char str[7];
 } errstr[] = {
-	{ .err = EACCES         , .str = "EACCES" },
-	{ .err = EAFNOSUPPORT   , .str = "EAFNOSUPPORT" },
-	{ .err = EEXIST         , .str = "EEXIST" },
-	{ .err = EFAULT         , .str = "EFAULT" },
-	{ .err = EFBIG          , .str = "EFBIG" },
-	{ .err = EINVAL         , .str = "EINVAL" },
-	{ .err = EISDIR         , .str = "EISDIR" },
-	{ .err = ELOOP          , .str = "ELOOP" },
-	{ .err = EMFILE         , .str = "EMFILE" },
-	{ .err = ENAMETOOLONG   , .str = "ENAMETOOLONG" },
-	{ .err = ENFILE         , .str = "ENFILE" },
-	{ .err = ENOBUFS        , .str = "ENOBUFS" },
-	{ .err = ENODEV         , .str = "ENODEV" },
-	{ .err = ENOENT         , .str = "ENOENT" },
-	{ .err = ENOMEM         , .str = "ENOMEM" },
-	{ .err = ENOSPC         , .str = "ENOSPC" },
-	{ .err = ENOSYS         , .str = "ENOSYS" },
-	{ .err = ENOTDIR        , .str = "ENOTDIR" },
-	{ .err = ENXIO          , .str = "ENXIO" },
-	{ .err = EPERM          , .str = "EPERM" },
-	{ .err = EPROTONOSUPPORT, .str = "EPROTONOSUPPORT" },
-	{ .err = EROFS          , .str = "EROFS" },
-	{ .err = ETXTBSY        , .str = "ETXTBSY" },
-	{ .err = EWOULDBLOCK    , .str = "EWOULDBLOCK" },
+	{ .err = EACCES         , .str = "EACCES" }, // open, socket
+	{ .err = EFAULT         , .str = "EFAULT" }, // open
+	{ .err = EFBIG          , .str = "EFBIG" },  // open
+	{ .err = EINVAL         , .str = "EINVAL" }, // iopl, socket
+	{ .err = EISDIR         , .str = "EISDIR" }, // open
+	{ .err = ELOOP          , .str = "ELOOP" },  // open
+	{ .err = EMFILE         , .str = "EMFILE" }, // open, socket
+	{ .err = ENAMETOOLONG   , .str = "E2LONG" }, // open
+	{ .err = ENFILE         , .str = "ENFILE" }, // open, socket
+	{ .err = ENOBUFS        , .str = "ENOBUF" },// socket,
+	{ .err = ENODEV         , .str = "ENODEV" }, // open
+	{ .err = ENOENT         , .str = "ENOENT" }, // open
+	{ .err = ENOMEM         , .str = "ENOMEM" }, // open, socket
+	{ .err = ENOSYS         , .str = "ENOSYS" }, // iopl
+	{ .err = ENXIO          , .str = "ENXIO" }, // open
+	{ .err = EPERM          , .str = "EPERM" }, // iopl
 };
 
 /* return an error message for errno <err> */
@@ -209,7 +201,7 @@ static const char *errmsg(int err)
 {
 	int i;
 	for (i = 0; i < sizeof(errstr)/sizeof(errstr[0]); i++)
-		if (errstr[i].err == err)
+		if (errstr[i].err == (unsigned char)err)
 			return errstr[i].str;
 	return "Unknown error";
 }
