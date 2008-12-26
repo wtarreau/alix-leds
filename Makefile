@@ -1,4 +1,4 @@
-OBJS	= alix-leds
+OBJS	= alix-leds alix-switch
 
 CC	= gcc
 STRIP	= strip
