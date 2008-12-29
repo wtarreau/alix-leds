@@ -1,5 +1,5 @@
 /*
- * alix-leds version 3.0 - (C) 2008 - Willy Tarreau <w@1wt.eu>
+ * alix-leds version 4.0 - (C) 2008 - Willy Tarreau <w@1wt.eu>
  * Blink LEDs on ALIX motherboards depending on network status.
  * Redistribute under GPLv2.
  *
@@ -51,6 +51,10 @@ struct ethtool_value {
 #define MAXSLEEP   1000000
 #define SLEEP_1SEC 1000000
 #define SLEEP_500M  500000
+
+/* ALIX switch */
+#define SWITCH_PORT 0x61B0
+#define SWITCH_MASK 0x0100
 
 /* ALIX leds */
 #define LED1_PORT 0x6100
@@ -148,12 +152,12 @@ static char trash[2048];
 
 const char usage[] =
 #ifndef QUIET
-  "alix-leds version 3.0 - (C) 2008 - Willy Tarreau <w@1wt.eu>\n"
+  "alix-leds version 4.0 - (C) 2008 - Willy Tarreau <w@1wt.eu>\n"
   "  Blink LEDs on ALIX motherboards depending on system and network status.\n"
   "\n"
   "Usage:\n"
   "  # alix-leds [-p pidfile] {[-l 1|2|3] [-durR] [-i intf] [-s slave] [-t tun]}*\n"
-  "              [-I]\n"
+  "              [-I] [-S]\n"
   "\n"
   "LEDs 1,2,3 are independently managed. Specify one led, followed by the checks\n"
   "to associate to that LED. Repeat for other leds. Network interface status can\n"
@@ -170,6 +174,7 @@ const char usage[] =
   "Use -p to store the daemon's pid into file <pidfile>. The 'usage' mode (-u)\n"
   "reports CPU usage by blinking slower or faster depending on the load. -I sets\n"
   "scheduling to idle priority (less precise). -d enables monitoring of hard disk.\n"
+  "-S checks switch and returns 0 if pressed. Will also blink all specified leds.\n"
 #endif
   "";
 
@@ -646,6 +651,11 @@ int update_disk(struct led *led)
 }
 
 
+static inline int switch_pressed()
+{
+	return !(inl(SWITCH_PORT) & SWITCH_MASK);
+}
+
 static inline void setled(unsigned leds, unsigned mask, unsigned port)
 {
 #ifndef DEBUG
@@ -876,6 +886,8 @@ int main(int argc, char **argv)
 	int pid, fd;
 	int sched;
 	int prio = 0;
+	int switch_mode = 0;
+	int led_mask = 0;
 
 	/* cheaper than pre-initializing the array in the .data section */
 	init_leds(leds);
@@ -920,6 +932,8 @@ int main(int argc, char **argv)
 		}
 		else if (argv[0][1] == 'I')
 			prio = 1;
+		else if (argv[0][1] == 'S')
+			switch_mode = 1;
 
 		/* options with two args below */
 		else if (argc < 2)
@@ -964,10 +978,10 @@ int main(int argc, char **argv)
 		}
 		else if (argv[0][1] == 'l') {
 			int l = atoi(argv[1]);
-			if (l >= 1 && l <= 3)
-				led = &leds[l - 1];
-			else
+			if (l < 1 || l > 3)
 				die(1, usage);
+			led = &leds[l - 1];
+			led_mask |= (1 << (l-1));
 			argc--; argv++;
 		}
 		else if (argv[0][1] == 'p') {
@@ -979,16 +993,46 @@ int main(int argc, char **argv)
 		argc--; argv++;
 	}
 
-	/* we want at least one led! */
-	if (!led)
-		die(1, usage);
-
 	if (iopl(3) == -1)
 #ifndef DEBUG
 		die(-1, "Cannot get I/O port");
 #else
 	;
 #endif
+	/* in switch mode, the led is not mandatory */
+	if (switch_mode) {
+		int light = LED_ON;
+
+		if (!switch_pressed())
+			return 1;
+
+		/* OK, at least one led was specified. We'll blink all leds as
+		 * long as the switch remains pressed.
+		 */
+		while (led_mask && switch_pressed()) {
+			int i;
+			for (i = 0; i <= 2; i++) {
+				if ((led_mask >> i) & 1)
+					setled(leds[i].mask, light, leds[i].port);
+			}
+			usleep(150000);
+			light = ~light;
+		}
+
+		/* restore previous LED status */
+		if (led_mask & 1)
+			setled(LED1_MASK, LED_ON, LED1_PORT);
+		if (led_mask & 2)
+			setled(LED2_MASK, ~LED_ON, LED2_PORT);
+		if (led_mask & 4)
+			setled(LED3_MASK, ~LED_ON, LED3_PORT);
+		return 0;
+	}
+
+	/* we want at least one led! */
+	if (!led_mask)
+		die(1, usage);
+
 	if (net_sock == -1) {
 		/* at least one interface requires network status */
 		net_sock = socket(PF_INET, SOCK_DGRAM, 0);
