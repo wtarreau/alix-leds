@@ -38,6 +38,9 @@ struct ethtool_value {
         __u32     data;
 };
 
+#define FIRST_SIG 32
+#define LAST_SIG  63
+
 #define ETHTOOL_GLINK 0xa
 
 #ifndef SIOCETHTOOL
@@ -51,6 +54,10 @@ struct ethtool_value {
 #define MAXSLEEP   1000000
 #define SLEEP_1SEC 1000000
 #define SLEEP_500M  500000
+#define SLEEP_250M  250000
+
+/* default signal blinking delay */
+#define BLINK_DURATION (15 * SLEEP_1SEC)
 
 /* ALIX switch */
 #define SWITCH_PORT 0x61B0
@@ -139,10 +146,28 @@ static struct if_status ifs[MAXIFS];
 static int nbifs;
 static struct if_list ifl[MAXIFL];
 static int nbifl;
+static unsigned char blink_pattern[LAST_SIG-FIRST_SIG]; /* patterns for signals FIRST_SIG..LAST_SIG-1 */
+
+/* blink pattern format is a 6-bit integer :
+ * 0 0 O1 E1 O2 E2 O3 E3
+ *   - Ex defines the state of LED x on even cycles
+ *   - Ox defines the state of LED x on odd cycles
+ * Suggest:
+ *   alix-leds -i eth0						\
+ *     -b 32 57 -b 33 58 -b 34 56 -b 35 59 -b 36 50 -b 37 61	\
+ *     -l 1 -u -l 2 -d -l 3 -i eth0 -i eth1 -i eth2
+ * to always have LED1 on, and 6 combinations of the two other ones.
+ */
 
 /* network socket */
 static int net_sock;  /* -2 = unneeded, -1 = needed, >=0 = initialized */
 static int fast_mode; /* start blink fast for running led */
+static int blinker_remain; /* minimum time the blinker mode must remain */
+static int blink_mode; /* number of the last received signal to be handled */
+static int blink_restore; /* leds status to restore */
+
+/* how much time the blink handler must sleep */
+static int blinker_sleep;
 
 /* This trash buffer may be used at will. It's mostly a buffer to store file
  * contents when parsing them. It should be enough to read stats for about 12
@@ -157,7 +182,7 @@ const char usage[] =
   "\n"
   "Usage:\n"
   "  # alix-leds [-p pidfile] {[-l 1|2|3] [-durR] [-i intf] [-s slave] [-t tun]}*\n"
-  "              [-I] [-S]\n"
+  "              [-I] [-S] [-i intf] [ -b sig pat ]*\n"
   "\n"
   "LEDs 1,2,3 are independently managed. Specify one led, followed by the checks\n"
   "to associate to that LED. Repeat for other leds. Network interface status can\n"
@@ -175,6 +200,8 @@ const char usage[] =
   "reports CPU usage by blinking slower or faster depending on the load. -I sets\n"
   "scheduling to idle priority (less precise). -d enables monitoring of hard disk.\n"
   "-S checks switch and returns 0 if pressed. Will also blink all specified leds.\n"
+  "-b indicates led patterns to use upon signal reception (32..63). Sig 63 stops.\n"
+  "Signal blinking automatically stops after 15s if at least one intf is plugged.\n"
 #endif
   "";
 
@@ -192,13 +219,13 @@ static const struct {
 	{ .err = EMFILE         , .str = "EMFILE" }, // open, socket
 	{ .err = ENAMETOOLONG   , .str = "E2LONG" }, // open
 	{ .err = ENFILE         , .str = "ENFILE" }, // open, socket
-	{ .err = ENOBUFS        , .str = "ENOBUF" },// socket,
+	{ .err = ENOBUFS        , .str = "ENOBUF" }, // socket,
 	{ .err = ENODEV         , .str = "ENODEV" }, // open
 	{ .err = ENOENT         , .str = "ENOENT" }, // open
 	{ .err = ENOMEM         , .str = "ENOMEM" }, // open, socket
 	{ .err = ENOSYS         , .str = "ENOSYS" }, // iopl
-	{ .err = ENXIO          , .str = "ENXIO" }, // open
-	{ .err = EPERM          , .str = "EPERM" }, // iopl
+	{ .err = ENXIO          , .str = "ENXIO" },  // open
+	{ .err = EPERM          , .str = "EPERM" },  // iopl
 };
 
 /* return an error message for errno <err> */
@@ -658,9 +685,31 @@ static inline int switch_pressed()
 
 static inline void setled(unsigned leds, unsigned mask, unsigned port)
 {
-#ifndef DEBUG
+	//#ifndef DEBUG
 	outl(leds & mask, port);
-#endif
+	//#endif
+}
+
+/* returns the 3 leds status in [0]=led1, [1]=led2, [2]=led3 */
+static int get_all_leds()
+{
+	int ret = 0;
+
+	if (inl(LED1_PORT) & LED1_MASK & LED_ON)
+		ret |= 1;
+	if (inl(LED2_PORT) & LED2_MASK & LED_ON)
+		ret |= 2;
+	if (inl(LED3_PORT) & LED3_MASK & LED_ON)
+		ret |= 4;
+	return ret;
+}
+
+/* sets the 3 leds status at once with [0]=led1, [1]=led2, [2]=led3 */
+static void set_all_leds(int state)
+{
+	setled(LED1_MASK, state & 1 ? LED_ON : ~LED_ON, LED1_PORT);
+	setled(LED2_MASK, state & 2 ? LED_ON : ~LED_ON, LED2_PORT);
+	setled(LED3_MASK, state & 4 ? LED_ON : ~LED_ON, LED3_PORT);
 }
 
 void manage_disk(struct led *led)
@@ -851,6 +900,43 @@ void manage_net(struct led *led)
 	}
 }
 
+/* returns 0 if it needs to stop */
+int handle_special_blink()
+{
+	static int cycle;
+	int i;
+	int finished = 1;
+	unsigned char pattern;
+
+	if (blinker_remain > 0) {
+		/* enforce minimum time */
+		finished = 0;
+	}
+	else {
+		/* don't stop till all reported interfaces are down */
+		for (i = 0; i < nbifs; i++)
+			if (ifs[i].status & IF_CHECK_PHYSICAL)
+				break;
+		if (i > nbifs)
+			finished = 0;
+	}
+
+	if (finished) {
+		set_all_leds(blink_restore);
+		return 0;
+	}
+
+	/* get either 00101010 or 00010101 from the current blink pattern */
+	pattern = (blink_pattern[blink_mode - FIRST_SIG] >> cycle) & 0x15;
+
+	setled(LED1_MASK, (pattern & 0x10) ? LED_ON : ~LED_ON, LED1_PORT);
+	setled(LED2_MASK, (pattern & 0x04) ? LED_ON : ~LED_ON, LED2_PORT);
+	setled(LED3_MASK, (pattern & 0x01) ? LED_ON : ~LED_ON, LED3_PORT);
+	
+	cycle = (cycle + 1) & 1;
+	return 1;
+}
+
 void sig_handler(int sig)
 {
 	switch (sig) {
@@ -859,6 +945,19 @@ void sig_handler(int sig)
 		break;
 	case SIGUSR2:
 		fast_mode = 1;
+		break;
+	case FIRST_SIG ... LAST_SIG-1:
+		if (!blink_mode)
+			blink_restore = get_all_leds();
+		blinker_remain = BLINK_DURATION; /* report special cond for at least 15s */
+		blinker_sleep = 0;
+		blink_mode = sig;
+		break;
+	case LAST_SIG:
+		if (!blink_mode)
+			blink_restore = get_all_leds();
+		blinker_remain = 0; /* immediately stop blinking */
+		blinker_sleep = 0;
 		break;
 	}
 	signal(sig, sig_handler);
@@ -940,14 +1039,19 @@ int main(int argc, char **argv)
 			die(1, usage);
 
 		else if (argv[0][1] == 'i') {
-			if (!led)
-				die(1, "Must specify led before interface");
-			if (led->type != LED_UNUSED && led->type != LED_NET)
-				die(1, "LED already assigned to non-net polling");
-			led->type = LED_NET;
-			led->intf = newif(argv[1], IF_CHECK_BOTH, led->intf);
-			if (!led->intf)
-				die(1, "Too many interfaces");
+			if (led) {
+				if (led->type != LED_UNUSED && led->type != LED_NET)
+					die(1, "LED already assigned to non-net polling");
+				led->type = LED_NET;
+				led->intf = newif(argv[1], IF_CHECK_BOTH, led->intf);
+				if (!led->intf)
+					die(1, "Too many interfaces");
+			} else {
+				/* interface specified before any led, just track it without
+				 * associating it.
+				 */
+				getif(argv[1], IF_CHECK_BOTH);
+			}
 			last_interf = argv[1];
 			net_sock = -1;
 			argc--; argv++;
@@ -986,6 +1090,22 @@ int main(int argc, char **argv)
 		}
 		else if (argv[0][1] == 'p') {
 			pidname = argv[1];
+			argc--; argv++;
+		}
+
+		/* options with three args below */
+		else if (argc < 3)
+			die(1, usage);
+
+		else if (argv[0][1] == 'b') {
+			/* blink on some signal conditions. Format: -b <signum> <pattern> */
+			int l = atoi(argv[1]);
+
+			if (l < FIRST_SIG || l >= LAST_SIG)
+				die(1, usage);
+
+			blink_pattern[l - 32] = atoi(argv[2]); /* store blink pattern */
+			argc--; argv++;
 			argc--; argv++;
 		}
 		else
@@ -1060,8 +1180,9 @@ int main(int argc, char **argv)
 		return 0;
 	}
 
-	/* we want at least one led! */
-	if (!led_mask)
+	/* we want at least one led or one blink pattern! */
+	if (!led_mask && !blink_pattern[0] &&
+	    memcmp(blink_pattern, blink_pattern + 1, sizeof(blink_pattern)-1) == 0)
 		die(1, usage);
 
 	if (net_sock == -1) {
@@ -1094,6 +1215,9 @@ int main(int argc, char **argv)
 
 	signal(SIGUSR1, sig_handler);
 	signal(SIGUSR2, sig_handler);
+	for (fd = FIRST_SIG; fd <= LAST_SIG; fd++)
+		signal(fd, sig_handler);  /* and enable signal */
+
 
 #ifndef DEBUG
 	if (pidname) {
@@ -1141,50 +1265,74 @@ int main(int argc, char **argv)
 			sleep_time = net_sleep;
 		}
 
-		for (led_num = 0; led_num < 3; led_num++) {
-			led = &leds[led_num];
+		if (blink_mode && blinker_sleep <= 0) {
+			/* we're in a special condition, a special signal was
+			 * reported and is prevalent over leds management.
+			 * We stay in this state for at least signal_ms and
+			 * as long as all of the tracked interfaces are down.
+			 */
+			if (!handle_special_blink()) {
+				/* end of processing */
+				blink_mode = 0;
+				blinker_sleep = 0;
+			}
 
-			if (led->type == LED_UNUSED)
-				continue;
+			blinker_sleep = SLEEP_250M;
+			if (blinker_sleep < sleep_time)
+				sleep_time = blinker_sleep;
+		} else {
+			for (led_num = 0; led_num < 3; led_num++) {
+				led = &leds[led_num];
 
-			if (led->sleep > 0)
-				continue;
+				if (led->type == LED_UNUSED)
+					continue;
 
-			/* led timer expired */
-			switch (led->type) {
-			case LED_NET:
-				manage_net(led);
-				break;
-			case LED_RUNNING:
-				manage_running(led);
-				break;
-			case LED_CPU:
-				manage_cpu(led);
-				break;
-			case LED_DISK:
-				manage_disk(led);
-				break;
+				if (led->sleep > 0)
+					continue;
+
+				/* led timer expired */
+				switch (led->type) {
+				case LED_NET:
+					manage_net(led);
+					break;
+				case LED_RUNNING:
+					manage_running(led);
+					break;
+				case LED_CPU:
+					manage_cpu(led);
+					break;
+				case LED_DISK:
+					manage_disk(led);
+					break;
+				}
+			}
+
+			for (led_num = 0; led_num < 3; led_num++) {
+				led = &leds[led_num];
+				if (led->type != LED_UNUSED && led->sleep < sleep_time)
+					sleep_time = led->sleep;
 			}
 		}
 
-		for (led_num = 0; led_num < 3; led_num++) {
-			led = &leds[led_num];
-			if (led->type != LED_UNUSED && led->sleep < sleep_time)
-				sleep_time = led->sleep;
-		}
-
-		/* Sleep and ignore signals. We will drift but its not dramatic */
-		while (usleep(sleep_time) != 0 && errno == EINTR);
+		/* Sleep but stop on signals. We will drift but its not dramatic */
+		if (usleep(sleep_time) != 0)
+			sleep_time = 0;
 
 		/* update the network checker's sleep time */
 		if (nbifs)
 			net_sleep -= sleep_time;
 
-		/* update all leds' sleep time */
-		for (led_num = 0; led_num < 3; led_num++) {
-			led = &leds[led_num];
-			if (led->type != LED_UNUSED)
-				led->sleep -= sleep_time;
+		if (blink_mode) {
+			blinker_sleep -= sleep_time;
+			if (blinker_remain > 0) /* remain zero once zero */
+				blinker_remain -= sleep_time;
+		} else {
+			/* update all leds' sleep time */
+			for (led_num = 0; led_num < 3; led_num++) {
+				led = &leds[led_num];
+				if (led->type != LED_UNUSED)
+					led->sleep -= sleep_time;
+			}
 		}
 	}
 }
