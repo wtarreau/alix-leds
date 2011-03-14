@@ -1,5 +1,5 @@
 /*
- * alix-leds version 4.0 - (C) 2008 - Willy Tarreau <w@1wt.eu>
+ * alix-leds version 5.0 - (C) 2011 - Willy Tarreau <w@1wt.eu>
  * Blink LEDs on ALIX motherboards depending on network status.
  * Redistribute under GPLv2.
  *
@@ -177,7 +177,7 @@ static char trash[2048];
 
 const char usage[] =
 #ifndef QUIET
-  "alix-leds version 4.0 - (C) 2008 - Willy Tarreau <w@1wt.eu>\n"
+  "alix-leds version 5.0 - (C) 2011 - Willy Tarreau <w@1wt.eu>\n"
   "  Blink LEDs on ALIX motherboards depending on system and network status.\n"
   "\n"
   "Usage:\n"
