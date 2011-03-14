@@ -999,18 +999,29 @@ int main(int argc, char **argv)
 #else
 	;
 #endif
-	/* in switch mode, the led is not mandatory */
+	/* in switch mode, we have two methods :
+	 *   - if leds are not handled, we return immediately the button state.
+	 *   - if leds are handled, we blink all of them for two seconds or until
+	 *     the switch is released. If the switch is released before the end,
+	 *     we restore led states and return that nothing was pressed. This
+	 *     gives some time to the operator to abort what's in progress.
+	 */
 	if (switch_mode) {
 		int light = LED_ON;
+		int i, count;
 
 		if (!switch_pressed())
 			return 1;
 
-		/* OK, at least one led was specified. We'll blink all leds as
-		 * long as the switch remains pressed.
+		/* OK button is pressed */
+
+		if (!led_mask)
+			return 0;
+
+		/* OK, at least one led was specified. We'll blink all of them
+		 * long as the switch remains pressed, max 2 seconds.
 		 */
-		while (led_mask && switch_pressed()) {
-			int i;
+		for (count = 13; count > 0 && switch_pressed(); count--) {
 			for (i = 0; i <= 2; i++) {
 				if ((led_mask >> i) & 1)
 					setled(leds[i].mask, light, leds[i].port);
@@ -1019,13 +1030,33 @@ int main(int argc, char **argv)
 			light = ~light;
 		}
 
-		/* restore previous LED status */
-		if (led_mask & 1)
-			setled(LED1_MASK, LED_ON, LED1_PORT);
-		if (led_mask & 2)
-			setled(LED2_MASK, ~LED_ON, LED2_PORT);
-		if (led_mask & 4)
-			setled(LED3_MASK, ~LED_ON, LED3_PORT);
+		if (count) {
+			/* switch was released before the end, restore normal LED status (ON/OFF/OFF) */
+			if (led_mask & 1)
+				setled(LED1_MASK, LED_ON, LED1_PORT);
+			if (led_mask & 2)
+				setled(LED2_MASK, ~LED_ON, LED2_PORT);
+			if (led_mask & 4)
+				setled(LED3_MASK, ~LED_ON, LED3_PORT);
+			return 1;
+		}
+
+		/* The switch was kept pressed. Turn all leds on and wait for it
+		 * to be released so that it does not affect further operations.
+		 */
+
+		while (switch_pressed()) {
+			for (i = 0; i <= 2; i++) {
+				if ((led_mask >> i) & 1)
+					setled(leds[i].mask, LED_ON, leds[i].port);
+			}
+			usleep(100000);
+		}
+
+		/* let the external code run with leds still turned on, to indicate
+		 * special processing. Further invocation of the program will make
+		 * this disappear, as will a reboot do.
+		 */
 		return 0;
 	}
 
